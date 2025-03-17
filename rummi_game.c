@@ -246,5 +246,7 @@ int main() {
 
     printf("Juego inicializado correctamente.\n");
     return 0;
+
 }
+
 
