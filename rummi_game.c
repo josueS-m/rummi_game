@@ -64,6 +64,7 @@ typedef struct {
     int grupos_formados;
     int escaleras_formadas;
     int victorias_con_escalera;
+    int tiempo_restante; //Para tiempo restante del bloqueo
 } pcb_t;
 
 // ---------------------- Variables Globales para Concurrencia ----------------------
@@ -74,7 +75,10 @@ int frente = 0, final = 0; // Índices para la cola de listos
 int cola_bloqueados[NUM_JUGADORES]; // Cola de jugadores bloqueados
 int num_bloqueados = 0; // Número de jugadores bloqueados
 int turno_actual = 0; // ID del jugador con turno actual
-		      
+
+//Variable globales para jugadores y PCBs
+jugador_t jugadores[NUM_JUGADORES];
+pcb_t pcbs[NUM_JUGADORES];
 		      
 // ---------------------- Funciones para Mazo -----------------------
 
@@ -165,6 +169,7 @@ void actualizar_pcb(pcb_t *pcb, jugador_t *jugador) {
     pcb->grupos_formados = 0;
     pcb->escaleras_formadas = 0;
     pcb->victorias_con_escalera = 0;
+    pcb->tiempo_restante=0;
 }
 
 // ---------------------- Escritura PCB y Tabla Procesos -----------------------
@@ -346,17 +351,20 @@ int main() {
         printf("Jugador %d - %s\n", jugadores[i].id, jugadores[i].nombre);
         mostrar_mano(&(jugadores[i].mano));
         escribir_pcb(pcbs[i]);
-        printf("-----------------------------------\n");
+        printf("---------------------------------------\n");
+    }
+
+    // Inicializar turno_actual y cola de listos
+    turno_actual = 1; // Iniciar con el Jugador 1
+    for (int i = 0; i < NUM_JUGADORES; i++) {
+        agregar_a_cola_listos(jugadores[i].id);
     }
 
     actualizar_tabla_procesos(pcbs, NUM_JUGADORES);
 
-    //Iniciar concurrencia e hilos
-    iniciar_concurrencia(); 
+    // Iniciar concurrencia e hilos
+    iniciar_concurrencia();
 
     printf("Juego inicializado correctamente.\n");
     return 0;
-
 }
-
-
