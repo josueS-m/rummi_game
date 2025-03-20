@@ -2,9 +2,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <pthread.h> 
+#include <unistd.h>
 
 #define MAX_CARTAS 108
 #define MAX_MANO 14
+#define NUM_JUGADORES 4
+#define QUANTUM 5 // Tiempo por turno en Round Robin
 
 typedef struct {
     int numero;
@@ -62,6 +66,16 @@ typedef struct {
     int victorias_con_escalera;
 } pcb_t;
 
+// ---------------------- Variables Globales para Concurrencia ----------------------
+
+pthread_mutex_t mutex_mesa = PTHREAD_MUTEX_INITIALIZER; // Mutex para proteger la mesa
+int cola_listos[NUM_JUGADORES]; // Cola de jugadores listos para actuar
+int frente = 0, final = 0; // Índices para la cola de listos
+int cola_bloqueados[NUM_JUGADORES]; // Cola de jugadores bloqueados
+int num_bloqueados = 0; // Número de jugadores bloqueados
+int turno_actual = 0; // ID del jugador con turno actual
+		      
+		      
 // ---------------------- Funciones para Mazo -----------------------
 
 void inicializar_mazo(mazo_t *mazo) {
@@ -216,19 +230,112 @@ void repartir_cartas(jugador_t jugadores[], int num_jugadores, mazo_t *mazo) {
     mazo->cantidad -= index;
 }
 
+// <---------------------- Módulo de Concurrencia e Hilos ---------------------->
+// Este módulo implementa la lógica de hilos, sincronización y planificación.
+
+// Función para agregar jugadores a la cola de listos
+void agregar_a_cola_listos(int id_jugador) {
+    cola_listos[final] = id_jugador;
+    final = (final + 1) % NUM_JUGADORES;
+}
+
+// Función para obtener el siguiente jugador en la cola de listos
+int siguiente_turno() {
+    if (frente == final) return -1; // Cola vacía
+    int id = cola_listos[frente];
+    frente = (frente + 1) % NUM_JUGADORES;
+    return id;
+}
+
+// Función para mover jugadores a la cola de bloqueados
+void mover_a_cola_bloqueados(int id_jugador) {
+    cola_bloqueados[num_bloqueados] = id_jugador;
+    num_bloqueados++;
+    pcbs[id_jugador - 1].estado = 0; // Bloqueado
+    pcbs[id_jugador - 1].tiempo_restante = rand() % 10 + 1; // Tiempo aleatorio
+}
+
+// Función para verificar y reactivar jugadores bloqueados
+void verificar_cola_bloqueados() {
+    for (int i = 0; i < num_bloqueados; i++) {
+        pcbs[cola_bloqueados[i] - 1].tiempo_restante--;
+        if (pcbs[cola_bloqueados[i] - 1].tiempo_restante <= 0) {
+            agregar_a_cola_listos(cola_bloqueados[i]);
+            pcbs[cola_bloqueados[i] - 1].estado = 1; // Listo
+            num_bloqueados--;
+        }
+    }
+}
+
+// Función del hilo del jugador
+void* jugador_thread(void* arg) {
+    jugador_t* jugador = (jugador_t*)arg;
+    pcb_t* pcb = &pcbs[jugador->id - 1];
+
+    while (1) {
+        pthread_mutex_lock(&mutex_mesa); // Bloquear acceso a la mesa
+
+        if (turno_actual == jugador->id) {
+            printf("Turno del Jugador %d - %s\n", jugador->id, jugador->nombre);
+
+            // Simular acción del jugador
+            if (jugador->mano.cantidad > 0) {
+                printf("Jugador %d baja una carta.\n", jugador->id);
+                jugador->mano.cantidad--;
+                pcb->cartas_descartadas++;
+            } else {
+                printf("Jugador %d no tiene cartas. Bloqueado.\n", jugador->id);
+                mover_a_cola_bloqueados(jugador->id);
+            }
+
+            // Actualizar PCB
+            pcb->cartas_en_mano = jugador->mano.cantidad;
+            pcb->estado = 1; // Listo
+
+            // Cambiar turno
+            turno_actual = siguiente_turno();
+            if (turno_actual == -1) break; // Fin del juego
+        }
+
+        pthread_mutex_unlock(&mutex_mesa); // Liberar acceso a la mesa
+        sleep(1); // Simular tiempo de procesamiento
+    }
+
+    return NULL;
+}
+
+// Función principal para iniciar hilos
+void iniciar_concurrencia() {
+    pthread_t hilos[NUM_JUGADORES];
+
+    // Crear hilos para cada jugador
+    for (int i = 0; i < NUM_JUGADORES; i++) {
+        pthread_create(&hilos[i], NULL, jugador_thread, &jugadores[i]);
+    }
+
+    // Esperar a que los hilos terminen
+    for (int i = 0; i < NUM_JUGADORES; i++) {
+        pthread_join(hilos[i], NULL);
+    }
+
+    printf("Juego terminado.\n");
+}
+
+// <---------------------- Fin del Módulo de Concurrencia e Hilos ---------------------->
+
 // ---------------------- MAIN -----------------------
 
 int main() {
     mazo_t mazo;
-    jugador_t jugadores[4];
-    pcb_t pcbs[4];
+    jugador_t jugadores[NUM_JUGADORES];
+    pcb_t pcbs[NUM_JUGADORES];
 
     inicializar_mazo(&mazo);
     barajar_mazo(&mazo);
 
-    repartir_cartas(jugadores, 4, &mazo);
+    repartir_cartas(jugadores, NUM_JUGADORES, &mazo);
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < NUM_JUGADORES; i++) {
         char nombre[20];
         printf("Ingrese el nombre del Jugador %d: ", i + 1);
         scanf("%19s", nombre);
@@ -242,7 +349,10 @@ int main() {
         printf("-----------------------------------\n");
     }
 
-    actualizar_tabla_procesos(pcbs, 4);
+    actualizar_tabla_procesos(pcbs, NUM_JUGADORES);
+
+    //Iniciar concurrencia e hilos
+    iniciar_concurrencia(); 
 
     printf("Juego inicializado correctamente.\n");
     return 0;
