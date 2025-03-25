@@ -8,7 +8,10 @@
 #define MAX_CARTAS 108
 #define MAX_MANO 14
 #define NUM_JUGADORES 4
-#define QUANTUM 5 // Tiempo por turno en Round Robin
+#define QUANTUM 5 // Tiempo por turno en Round Robinson
+#define PUNTOS_MINIMOS_APEADA 30
+
+//<----------Estructuras----------->
 
 typedef struct {
     int numero;
@@ -79,6 +82,187 @@ int turno_actual = 0; // ID del jugador con turno actual
 //Variable globales para jugadores y PCBs
 jugador_t jugadores[NUM_JUGADORES];
 pcb_t pcbs[NUM_JUGADORES];
+
+//<------Logica del juego--------->
+
+int es_grupo_valido(carta_t cartas[], int cantidad) {
+    int numero_base = -1;
+    for (int i = 0; i < cantidad; i++) {
+        if (cartas[i].numero != 0) {
+            if (numero_base == -1)
+                numero_base = cartas[i].numero;
+            else if (cartas[i].numero != numero_base)
+                return 0;
+        }
+    }
+    return (numero_base != -1);
+}
+
+int es_escalera_valida(carta_t cartas[], int cantidad) {
+    int nums[3], idx = 0;
+    char color_base[10] = "";
+
+    for (int i = 0; i < cantidad; i++) {
+        if (cartas[i].numero != 0) {
+            nums[idx++] = cartas[i].numero;
+            if (strlen(color_base) == 0)
+                strcpy(color_base, cartas[i].color);
+            else if (strcmp(color_base, cartas[i].color) != 0)
+                return 0;
+        }
+    }
+
+    if (idx == 0) return 0;
+
+    // Ordenar números
+    for (int i = 0; i < idx-1; i++) {
+        for (int j = i+1; j < idx; j++) {
+            if (nums[i] > nums[j]) {
+                int temp = nums[i];
+                nums[i] = nums[j];
+                nums[j] = temp;
+            }
+        }
+    }
+
+    int huecos = 0;
+    for (int i = 0; i < idx-1; i++) {
+        huecos += (nums[i+1] - nums[i] - 1);
+    }
+
+    int comodines = cantidad - idx;
+    return (huecos <= comodines);
+}
+
+int calcular_puntos_grupo(carta_t grupo[], int cantidad) {
+    int valor_base = -1;
+    for (int i = 0; i < cantidad; i++) {
+        if (grupo[i].numero != 0) {
+            valor_base = grupo[i].numero;
+            break;
+        }
+    }
+    if (valor_base == -1) return 0;
+    return cantidad * valor_base;
+}
+
+int calcular_puntos_escalera(carta_t escalera[], int cantidad) {
+    int puntos = 0;
+    int nonwild[3], idx = 0;
+    int num_wild = 0;
+
+    for (int i = 0; i < cantidad; i++) {
+        if (escalera[i].numero == 0) {
+            num_wild++;
+        } else {
+            nonwild[idx++] = escalera[i].numero;
+            puntos += escalera[i].numero;
+        }
+    }
+
+    if (num_wild > 0 && idx > 0) {
+        int max_val = nonwild[0];
+        for (int i = 1; i < idx; i++) {
+            if (nonwild[i] > max_val) max_val = nonwild[i];
+        }
+        puntos += num_wild * (max_val + 1);
+    }
+    return puntos;
+}
+
+void verificar_apeadas(jugador_t *jugador) {
+    mano_t *mano = &(jugador->mano);
+    int puntos_apeada = 0;
+    int cartas_apeadas = 0;
+
+    // Buscar grupos
+    for (int i = 0; i < mano->cantidad - 2; i++) {
+        for (int j = i+1; j < mano->cantidad - 1; j++) {
+            for (int k = j+1; k < mano->cantidad; k++) {
+                carta_t grupo[3] = {mano->cartas[i], mano->cartas[j], mano->cartas[k]};
+                if (es_grupo_valido(grupo, 3)) {
+                    int puntos = calcular_puntos_grupo(grupo, 3);
+                    puntos_apeada += puntos;
+                    cartas_apeadas += 3;
+
+                    // Agregar al banco de apeadas
+                    if (banco_apeadas.total_grupos < 10) {
+                        memcpy(banco_apeadas.grupos[banco_apeadas.total_grupos].cartas, grupo, sizeof(grupo));
+                        banco_apeadas.grupos[banco_apeadas.total_grupos].cantidad = 3;
+                        banco_apeadas.total_grupos++;
+                    }
+
+                    // Eliminar cartas
+                    remover_carta(mano, k);
+                    remover_carta(mano, j);
+                    remover_carta(mano, i);
+                    pcbs[jugador->id-1].grupos_formados++;
+                    i = -1;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Buscar escaleras
+    for (int i = 0; i < mano->cantidad - 2; i++) {
+        for (int j = i+1; j < mano->cantidad - 1; j++) {
+            for (int k = j+1; k < mano->cantidad; k++) {
+                carta_t escalera[3] = {mano->cartas[i], mano->cartas[j], mano->cartas[k]};
+                if (es_escalera_valida(escalera, 3)) {
+                    int puntos = calcular_puntos_escalera(escalera, 3);
+                    puntos_apeada += puntos;
+                    cartas_apeadas += 3;
+
+                    // Agregar al banco de apeadas
+                    if (banco_apeadas.total_escaleras < 10) {
+                        memcpy(banco_apeadas.escaleras[banco_apeadas.total_escaleras].cartas, escalera, sizeof(escalera));
+                        banco_apeadas.escaleras[banco_apeadas.total_escaleras].cantidad = 3;
+                        banco_apeadas.total_escaleras++;
+                    }
+
+                    // Eliminar cartas
+                    remover_carta(mano, k);
+                    remover_carta(mano, j);
+                    remover_carta(mano, i);
+                    pcbs[jugador->id-1].escaleras_formadas++;
+                    i = -1;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (puntos_apeada >= PUNTOS_MINIMOS_APEADA) {
+        printf("Jugador %d hizo apeada válida! Puntos: %d\n", jugador->id, puntos_apeada);
+        pcbs[jugador->id-1].puntos += puntos_apeada;
+    }
+}
+
+int determinar_ganador() {
+    int ganador = -1;
+    int min_cartas = MAX_MANO + 1;
+
+    for (int i = 0; i < NUM_JUGADORES; i++) {
+        if (jugadores[i].mano.cantidad < min_cartas) {
+            min_cartas = jugadores[i].mano.cantidad;
+            ganador = i;
+        }
+    }
+
+    if (ganador != -1) {
+        printf("\n¡Jugador %d - %s gana con %d cartas restantes!\n",
+               jugadores[ganador].id, jugadores[ganador].nombre, jugadores[ganador].mano.cantidad);
+        pcbs[ganador].partidas_ganadas++;
+        if (pcbs[ganador].escaleras_formadas > 0) {
+            pcbs[ganador].victorias_con_escalera = 1;
+        }
+    }
+
+    return ganador;
+}
+
+//<------Fin de la logica del juego--------->
 		      
 // ---------------------- Funciones para Mazo -----------------------
 
