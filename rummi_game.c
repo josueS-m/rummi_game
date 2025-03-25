@@ -38,11 +38,19 @@ typedef struct {
 } escalera_t;
 
 typedef struct {
-    grupo_t grupos[10];
-    escalera_t escaleras[10];
+    grupo_t grupos[4];
+    escalera_t escaleras[4];
     int total_grupos;
     int total_escaleras;
 } apeadas_t;
+
+typedef struct {
+	grupo_t *grupos;
+	escalera_t *escaleras;
+	int total_grupos;
+	int total_escaleras;
+} banco_de_escaleras_t;
+
 
 typedef struct {
     int id_jugador;
