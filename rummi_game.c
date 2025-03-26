@@ -5,6 +5,12 @@
 #include <pthread.h> 
 #include <unistd.h>
 
+
+#include <stdbool.h>
+#include <termios.h>
+#include <fcntl.h>
+
+
 #define MAX_CARTAS 108
 #define MAX_MANO 14
 #define NUM_JUGADORES 4
@@ -32,6 +38,9 @@ typedef struct {
     mano_t mano;
     char nombre[20];
     int id;
+    int turno;
+    int tiempo_restante;
+    bool en_juego;
 } jugador_t;
 
 typedef struct {
@@ -79,7 +88,8 @@ typedef struct {
 } pcb_t;
 
 // ---------------------- Variables Globales para Concurrencia ----------------------
-
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+char modo = 'F'; // Modo inicial FCFS
 pthread_mutex_t mutex_mesa = PTHREAD_MUTEX_INITIALIZER; // Mutex para proteger la mesa
 int cola_listos[NUM_JUGADORES]; // Cola de jugadores listos para actuar
 int frente = 0, final = 0; // Índices para la cola de listos
@@ -520,8 +530,58 @@ void iniciar_concurrencia() {
 
 // <---------------------- Fin del Módulo de Concurrencia e Hilos ---------------------->
 
-// ---------------------- MAIN -----------------------
+//------------------------------Algoritmos de planificacion-------------------------------
 
+// Función para capturar teclas sin bloqueo
+int kbhit() {
+    struct termios oldt, newt;
+    int ch;
+    int oldf;
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+    ch = getchar();
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    fcntl(STDIN_FILENO, F_SETFL, oldf);
+    if (ch != EOF) {
+        ungetc(ch, stdin);
+        return 1;
+    }
+    return 0;
+}
+
+// Función para ejecutar FCFS
+void *ejecutarFCFS(void *arg) {
+    jugador_t *jugador = (jugador_t *)arg;
+    pthread_mutex_lock(&mutex);
+    if (jugador->en_juego) {
+        printf("Jugador %d juega su turno completo.\n", jugador->id);
+        sleep(3);
+    }
+    pthread_mutex_unlock(&mutex);
+    return NULL;
+}
+
+// Función para ejecutar Round Robin
+void *ejecutarRoundRobin(void *arg) {
+    jugador_t *jugador = (jugador_t *)arg;
+    pthread_mutex_lock(&mutex);
+    if (jugador->en_juego) {
+        int tiempo_juego = (jugador->tiempo_restante > QUANTUM) ? QUANTUM : jugador->tiempo_restante;
+        printf("Jugador %d juega por %d unidades de tiempo.\n", jugador->id, tiempo_juego);
+        sleep(tiempo_juego);
+        jugador->tiempo_restante -= tiempo_juego;
+        if (jugador->tiempo_restante <= 0) {
+            jugador->en_juego = false;
+        }
+    }
+    pthread_mutex_unlock(&mutex);
+    return NULL;
+}
+//------------------Main------------------
 int main() {
     mazo_t mazo;
     jugador_t jugadores[NUM_JUGADORES];
@@ -558,5 +618,42 @@ int main() {
     iniciar_concurrencia();
 
     printf("Juego inicializado correctamente.\n");
+    return 0;
+
+    //Iniciar los algoritmos de planificacion 
+    
+      pthread_t hilos[NUM_JUGADORES];
+
+    // Inicialización de jugadores
+    for (int i = 0; i < NUM_JUGADORES; i++) {
+        jugadores[i].id = i + 1;
+        jugadores[i].turno = i;
+        jugadores[i].tiempo_restante = 10;
+        jugadores[i].en_juego = true;
+    }
+
+    while (1) {
+        system("clear");
+        printf("Presiona F para FCFS, R para Round Robin, Q para salir\n");
+        if (kbhit()) {
+            char tecla = getchar();
+            if (tecla == 'Q' || tecla == 'q') break;
+            if (tecla == 'F' || tecla == 'f') modo = 'F';
+            if (tecla == 'R' || tecla == 'r') modo = 'R';
+        }
+
+        // Ejecutar el modo seleccionado
+        for (int i = 0; i < NUM_JUGADORES; i++) {
+            if (modo == 'F') {
+                pthread_create(&hilos[i], NULL, ejecutarFCFS, (void *)&jugadores[i]);
+            } else {
+                pthread_create(&hilos[i], NULL, ejecutarRoundRobin, (void *)&jugadores[i]);
+            }
+            pthread_join(hilos[i], NULL);
+        }
+        sleep(1);
+    }
+
+    pthread_mutex_destroy(&mutex);
     return 0;
 }
