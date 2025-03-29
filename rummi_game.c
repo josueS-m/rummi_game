@@ -10,7 +10,6 @@
 #include <limits.h>
 
 void iniciar_concurrencia(); // Prototipo de la función
-void* jugador_thread(void* arg); // Prototipo de la función
 void* jugador_thread(void* arg); // Prototipo de la funciónlea
 
 // ----------------------------------------------------------------------
@@ -69,7 +68,6 @@ typedef struct
     int id;
     int tiempo_restante;
     bool en_juego;
-    int turno; // Turno del jugador
 } jugador_t;
 
 // PCB para seguimiento de jugador (estadísticas)
@@ -841,41 +839,4 @@ int main()
 
     printf("Juego terminado.\n");
     return 0;
-
-    //Iniciar los algoritmos de planificacion 
-    
-      pthread_t hilos[NUM_JUGADORES];
-
-    // Inicialización de jugadores
-    for (int i = 0; i < NUM_JUGADORES; i++) {
-        jugadores[i].id = i + 1;
-        jugadores[i].turno = i;
-        jugadores[i].tiempo_restante = 10;
-        jugadores[i].en_juego = true;
-    }
-
-    while (1) {
-        system("clear");
-        printf("Presiona F para FCFS, R para Round Robin, Q para salir\n");
-        if (kbhit()) {
-            char tecla = getchar();
-            if (tecla == 'Q' || tecla == 'q') break;
-            if (tecla == 'F' || tecla == 'f') modo = 'F';
-            if (tecla == 'R' || tecla == 'r') modo = 'R';
-        }
-
-        // Ejecutar el modo seleccionado
-        for (int i = 0; i < NUM_JUGADORES; i++) {
-            if (modo == 'F') {
-                pthread_create(&hilos[i], NULL, ejecutarFCFS, (void *)&jugadores[i]);
-            } else {
-                pthread_create(&hilos[i], NULL, ejecutarRoundRobin, (void *)&jugadores[i]);
-            }
-            pthread_join(hilos[i], NULL);
-        }
-        sleep(1);
-    }
-
-    pthread_mutex_destroy(&mutex);
-    return 0;
-}
+} 
