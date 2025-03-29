@@ -33,7 +33,6 @@ void* jugador_thread(void* arg); // Prototipo de la funciónlea
 // Carta
 typedef struct
 {
-    int dd;
     int numero;
     char color[10];
 } carta_t;
