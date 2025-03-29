@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <limits.h>
 
+
 void iniciar_concurrencia(); // Prototipo de la función
 void* jugador_thread(void* arg); // Prototipo de la funciónlea
 
@@ -21,7 +22,11 @@ void* jugador_thread(void* arg); // Prototipo de la funciónlea
 #define QUANTUM 5   // Tiempo por turno en Round Robin
 #define PUNTOS_MINIMOS_APEADA 30
 
-#define MAX_CARTAS_GRUPO 10 // Tamaño máximo de un grupo o escalera
+#define CARTAS_INICIALES 14
+#define MAX_COLOR 15
+#define MAX_NOMBRE 50
+#define MAX_CARTAS_GRUPO 4
+#define MAX_CARTAS_ESCALERA 13
 #define MAX_GRUPOS 10       // Máximo grupos en banco de apeadas
 #define MAX_ESCALERAS 10    // Máximo escaleras en banco de apeadas
 
@@ -33,7 +38,7 @@ void* jugador_thread(void* arg); // Prototipo de la funciónlea
 typedef struct
 {
     int numero;
-    char color[10];
+    char color[MAX_COLOR];
 } carta_t;
 
 // Mano (lista de cartas del jugador)
@@ -44,18 +49,23 @@ typedef struct
     int capacidad;
 } mano_t;
 
-// Grupo y Escalera: para simplificar, se usa el mismo tipo
 typedef struct
 {
     carta_t cartas[MAX_CARTAS_GRUPO];
     int cantidad;
-} grupo_t, escalera_t;
+} grupo_t;
 
-// Banco de apeadas: almacena grupos y escaleras formados
 typedef struct
 {
-    grupo_t grupos[MAX_GRUPOS];
-    escalera_t escaleras[MAX_ESCALERAS];
+    carta_t cartas[MAX_CARTAS_ESCALERA];
+    int cantidad;
+} escalera_t;
+
+
+typedef struct
+{
+    grupo_t *grupos;       // Array dinámico de grupos
+    escalera_t *escaleras; // Array dinámico de escaleras
     int total_grupos;
     int total_escaleras;
 } banco_de_apeadas_t;
@@ -64,9 +74,10 @@ typedef struct
 typedef struct
 {
     mano_t mano;
-    char nombre[20];
+    char nombre[MAX_NOMBRE];
     int id;
     int tiempo_restante;
+    int puntos_suficientes;
     bool en_juego;
 } jugador_t;
 
@@ -116,69 +127,102 @@ int cola_bloqueados[NUM_JUGADORES];
 int num_bloqueados = 0;
 
 // ----------------------------------------------------------------------
-// Funciones de Validación y Cálculo de Puntos
+// Funciones de Validación y Cálculo de Puntos (LOGICA)
 // ----------------------------------------------------------------------
-int es_grupo_valido(carta_t cartas[], int cantidad)
+
+// Verifica si un conjunto de cartas forma un grupo válido
+bool es_grupo_valido(const carta_t cartas[], int cantidad)
 {
+    if (cantidad < 3 || cantidad > MAX_CARTAS_GRUPO)
+        return false;
+
     int numero_base = -1;
     for (int i = 0; i < cantidad; i++)
     {
         if (cartas[i].numero != 0)
-        {
+        { // Si no es comodín
             if (numero_base == -1)
+            {
                 numero_base = cartas[i].numero;
+            }
             else if (cartas[i].numero != numero_base)
-                return 0;
+            {
+                return false;
+            }
         }
     }
-    return (numero_base != -1);
+    return (numero_base != -1); // Debe haber al menos una carta no comodín
 }
 
-int es_escalera_valida(carta_t cartas[], int cantidad)
+// Verifica si un conjunto de cartas forma una escalera válida
+bool es_escalera_valida(const carta_t cartas[], int cantidad)
 {
-    int nums[3], idx = 0;
-    char color_base[10] = "";
+    if (cantidad < 3 || cantidad > MAX_CARTAS_ESCALERA)
+        return false;
 
+    int numeros[MAX_CARTAS_ESCALERA];
+    char color_base[MAX_COLOR] = "";
+    int idx = 0;
+    int comodines = 0;
+
+    // Separar comodines y cartas normales
     for (int i = 0; i < cantidad; i++)
     {
-        if (cartas[i].numero != 0)
+        if (cartas[i].numero == 0)
         {
-            nums[idx++] = cartas[i].numero;
+            comodines++;
+        }
+        else
+        {
+            numeros[idx] = cartas[i].numero;
             if (strlen(color_base) == 0)
+            {
                 strcpy(color_base, cartas[i].color);
+            }
             else if (strcmp(color_base, cartas[i].color) != 0)
-                return 0;
+            {
+                return false; // Diferentes colores
+            }
+            idx++;
         }
     }
 
     if (idx == 0)
-        return 0;
+        return false; // Solo comodines no es válido
 
-    // Ordenar números
+    // Ordenar las cartas no comodines
     for (int i = 0; i < idx - 1; i++)
     {
         for (int j = i + 1; j < idx; j++)
         {
-            if (nums[i] > nums[j])
+            if (numeros[i] > numeros[j])
             {
-                int temp = nums[i];
-                nums[i] = nums[j];
-                nums[j] = temp;
+                int temp = numeros[i];
+                numeros[i] = numeros[j];
+                numeros[j] = temp;
             }
         }
     }
 
-    int huecos = 0;
+    // Verificar si los huecos pueden ser llenados con comodines
+    int huecos_necesarios = 0;
     for (int i = 0; i < idx - 1; i++)
     {
-        huecos += (nums[i + 1] - nums[i] - 1);
+        int diferencia = numeros[i + 1] - numeros[i];
+        if (diferencia <= 0 || diferencia > comodines + 1)
+        {
+            return false;
+        }
+        huecos_necesarios += (diferencia - 1);
     }
 
-    int comodines = cantidad - idx;
-    return (huecos <= comodines);
+    return (huecos_necesarios <= comodines);
 }
 
-int calcular_puntos_grupo(carta_t grupo[], int cantidad)
+/* ---------------------- FUNCIONES DE PUNTUACIÓN ---------------------- */
+
+// Calcula puntos de un grupo
+int calcular_puntos_grupo(const carta_t grupo[], int cantidad)
 {
     int valor_base = -1;
     for (int i = 0; i < cantidad; i++)
@@ -190,54 +234,101 @@ int calcular_puntos_grupo(carta_t grupo[], int cantidad)
         }
     }
     if (valor_base == -1)
-        return 0;
-    return cantidad * valor_base;
+        return 0; // Si todas son comodines
+    return valor_base * cantidad;
 }
 
-int calcular_puntos_escalera(carta_t escalera[], int cantidad)
+// Calcula puntos de una escalera
+int calcular_puntos_escalera(const carta_t escalera[], int cantidad)
 {
     int puntos = 0;
-    int nonwild[3], idx = 0;
-    int num_wild = 0;
+    int max_val = 0;
 
+    for (int i = 0; i < cantidad; i++)
+    {
+        if (escalera[i].numero != 0)
+        {
+            puntos += escalera[i].numero;
+            if (escalera[i].numero > max_val)
+            {
+                max_val = escalera[i].numero;
+            }
+        }
+    }
+
+    // Asignar valor a comodines (valor máximo + 1 para cada uno)
     for (int i = 0; i < cantidad; i++)
     {
         if (escalera[i].numero == 0)
         {
-            num_wild++;
-        }
-        else
-        {
-            nonwild[idx++] = escalera[i].numero;
-            puntos += escalera[i].numero;
+            puntos += (max_val + 1);
+            max_val++; // Incrementar para el próximo comodín
         }
     }
 
-    if (num_wild > 0 && idx > 0)
-    {
-        int max_val = nonwild[0];
-        for (int i = 1; i < idx; i++)
-        {
-            if (nonwild[i] > max_val)
-                max_val = nonwild[i];
-        }
-        puntos += num_wild * (max_val + 1);
-    }
     return puntos;
 }
 
-// ----------------------------------------------------------------------
-// Funciones de Apeadas
-// ----------------------------------------------------------------------
-void remover_carta(mano_t *mano, int pos); // Prototipo para poder usarla en verificar_apeadas
-
-void verificar_apeadas(jugador_t *jugador)
+// Calcula puntos totales de una apeada
+int calcular_puntos_banco(const banco_de_apeadas_t *banco)
 {
-    mano_t *mano = &(jugador->mano);
-    int puntos_apeada = 0;
-    int cartas_apeadas = 0;
+    int puntos = 0;
 
-    // Buscar grupos en la mano
+    for (int i = 0; i < banco->total_grupos; i++)
+    {
+        puntos += calcular_puntos_grupo(banco->grupos[i].cartas, banco->grupos[i].cantidad);
+    }
+
+    for (int i = 0; i < banco->total_escaleras; i++)
+    {
+        puntos += calcular_puntos_escalera(banco->escaleras[i].cartas, banco->escaleras[i].cantidad);
+    }
+
+    return puntos;
+}
+
+/* ---------------------- MANEJO DE CARTAS ---------------------- */
+
+// Remueve cartas usadas de la mano
+void remover_cartas(mano_t *mano, const int indices[], int cantidad)
+{
+    // Ordenar índices de mayor a menor
+    int indices_ordenados[cantidad];
+    memcpy(indices_ordenados, indices, cantidad * sizeof(int));
+
+    for (int i = 0; i < cantidad - 1; i++)
+    {
+        for (int j = i + 1; j < cantidad; j++)
+        {
+            if (indices_ordenados[i] < indices_ordenados[j])
+            {
+                int temp = indices_ordenados[i];
+                indices_ordenados[i] = indices_ordenados[j];
+                indices_ordenados[j] = temp;
+            }
+        }
+    }
+
+    // Eliminar cartas
+    for (int i = 0; i < cantidad; i++)
+    {
+        for (int j = indices_ordenados[i]; j < mano->cantidad - 1; j++)
+        {
+            mano->cartas[j] = mano->cartas[j + 1];
+        }
+        mano->cantidad--;
+    }
+}
+
+/* ---------------------- BÚSQUEDA DE COMBINACIONES ---------------------- */
+
+// Busca el mejor grupo disponible en la mano y lo añade al banco
+bool buscar_mejor_grupo(mano_t *mano, banco_de_apeadas_t *banco, int *puntos)
+{
+    int mejor_puntos = 0;
+    int mejores_indices[MAX_CARTAS_GRUPO] = {-1};
+    int mejor_cantidad = 0;
+
     for (int i = 0; i < mano->cantidad - 2; i++)
     {
         for (int j = i + 1; j < mano->cantidad - 1; j++)
@@ -245,33 +336,69 @@ void verificar_apeadas(jugador_t *jugador)
             for (int k = j + 1; k < mano->cantidad; k++)
             {
                 carta_t grupo[3] = {mano->cartas[i], mano->cartas[j], mano->cartas[k]};
+
                 if (es_grupo_valido(grupo, 3))
                 {
-                    int puntos = calcular_puntos_grupo(grupo, 3);
-                    puntos_apeada += puntos;
-                    cartas_apeadas += 3;
+                    int indices[4] = {i, j, k, -1};
+                    int cantidad = 3;
 
-                    // Agregar grupo al banco de apeadas
-                    if (banco_apeadas.total_grupos < MAX_GRUPOS)
+                    // Verificar si podemos añadir una cuarta carta
+                    for (int l = k + 1; l < mano->cantidad; l++)
                     {
-                        memcpy(banco_apeadas.grupos[banco_apeadas.total_grupos].cartas, grupo, sizeof(grupo));
-                        banco_apeadas.grupos[banco_apeadas.total_grupos].cantidad = 3;
-                        banco_apeadas.total_grupos++;
+                        carta_t grupo4[4] = {mano->cartas[i], mano->cartas[j],
+                                             mano->cartas[k], mano->cartas[l]};
+                        if (es_grupo_valido(grupo4, 4))
+                        {
+                            indices[3] = l;
+                            cantidad = 4;
+                            break;
+                        }
                     }
 
-                    // Eliminar cartas de la mano
-                    remover_carta(mano, k);
-                    remover_carta(mano, j);
-                    remover_carta(mano, i);
-                    pcbs[jugador->id - 1].grupos_formados++;
-                    i = -1;
-                    break;
+                    // Calcular puntos
+                    int pts = calcular_puntos_grupo(grupo, cantidad);
+                    if (pts > mejor_puntos)
+                    {
+                        mejor_puntos = pts;
+                        mejor_cantidad = cantidad;
+                        memcpy(mejores_indices, indices, mejor_cantidad * sizeof(int));
+                    }
                 }
             }
         }
     }
 
-    // Buscar escaleras en la mano
+    if (mejor_puntos > 0)
+    {
+        // Añadir el mejor grupo encontrado al banco
+        if (banco->total_grupos >= MAX_GRUPOS)
+        {
+            fprintf(stderr, "Error: Capacidad máxima de grupos alcanzada\n");
+            return false;
+        }
+
+        grupo_t *nuevo_grupo = &banco->grupos[banco->total_grupos++];
+        nuevo_grupo->cantidad = mejor_cantidad;
+        for (int i = 0; i < mejor_cantidad; i++)
+        {
+            nuevo_grupo->cartas[i] = mano->cartas[mejores_indices[i]];
+        }
+
+        *puntos += mejor_puntos;
+        remover_cartas(mano, mejores_indices, mejor_cantidad);
+        return true;
+    }
+
+    return false;
+}
+
+// Busca la mejor escalera disponible en la mano y la añade al banco
+bool buscar_mejor_escalera(mano_t *mano, banco_de_apeadas_t *banco, int *puntos)
+{
+    int mejor_puntos = 0;
+    int mejores_indices[MAX_CARTAS_ESCALERA] = {-1};
+    int mejor_cantidad = 0;
+
     for (int i = 0; i < mano->cantidad - 2; i++)
     {
         for (int j = i + 1; j < mano->cantidad - 1; j++)
@@ -279,59 +406,566 @@ void verificar_apeadas(jugador_t *jugador)
             for (int k = j + 1; k < mano->cantidad; k++)
             {
                 carta_t escalera[3] = {mano->cartas[i], mano->cartas[j], mano->cartas[k]};
+
                 if (es_escalera_valida(escalera, 3))
                 {
-                    int puntos = calcular_puntos_escalera(escalera, 3);
-                    puntos_apeada += puntos;
-                    cartas_apeadas += 3;
+                    int indices[MAX_CARTAS_ESCALERA] = {i, j, k};
+                    int cantidad = 3;
 
-                    // Agregar escalera al banco de apeadas
-                    if (banco_apeadas.total_escaleras < MAX_ESCALERAS)
+                    // Intentar extender la escalera
+                    for (int l = 0; l < mano->cantidad; l++)
                     {
-                        memcpy(banco_apeadas.escaleras[banco_apeadas.total_escaleras].cartas, escalera, sizeof(escalera));
-                        banco_apeadas.escaleras[banco_apeadas.total_escaleras].cantidad = 3;
-                        banco_apeadas.total_escaleras++;
+                        bool ya_en_escalera = false;
+                        for (int m = 0; m < cantidad; m++)
+                        {
+                            if (l == indices[m])
+                            {
+                                ya_en_escalera = true;
+                                break;
+                            }
+                        }
+
+                        if (!ya_en_escalera)
+                        {
+                            carta_t escalera_ext[MAX_CARTAS_ESCALERA];
+                            for (int m = 0; m < cantidad; m++)
+                            {
+                                escalera_ext[m] = mano->cartas[indices[m]];
+                            }
+                            escalera_ext[cantidad] = mano->cartas[l];
+
+                            if (es_escalera_valida(escalera_ext, cantidad + 1))
+                            {
+                                indices[cantidad] = l;
+                                cantidad++;
+                            }
+                        }
                     }
 
-                    // Eliminar cartas de la mano
-                    remover_carta(mano, k);
-                    remover_carta(mano, j);
-                    remover_carta(mano, i);
-                    pcbs[jugador->id - 1].escaleras_formadas++;
-                    i = -1;
+                    // Calcular puntos
+                    int pts = calcular_puntos_escalera(escalera, cantidad);
+                    if (pts > mejor_puntos)
+                    {
+                        mejor_puntos = pts;
+                        mejor_cantidad = cantidad;
+                        memcpy(mejores_indices, indices, mejor_cantidad * sizeof(int));
+                    }
+                }
+            }
+        }
+    }
+
+    if (mejor_puntos > 0)
+    {
+        // Añadir la mejor escalera encontrada al banco
+        if (banco->total_escaleras >= MAX_ESCALERAS)
+        {
+            fprintf(stderr, "Error: Capacidad máxima de escaleras alcanzada\n");
+            return false;
+        }
+
+        escalera_t *nueva_escalera = &banco->escaleras[banco->total_escaleras++];
+        nueva_escalera->cantidad = mejor_cantidad;
+        for (int i = 0; i < mejor_cantidad; i++)
+        {
+            nueva_escalera->cartas[i] = mano->cartas[mejores_indices[i]];
+        }
+
+        *puntos += mejor_puntos;
+        remover_cartas(mano, mejores_indices, mejor_cantidad);
+        return true;
+    }
+
+    return false;
+}
+
+// Busca combinaciones según la prioridad especificada y las añade al banco
+void buscar_combinaciones(mano_t *mano, banco_de_apeadas_t *banco, int *puntos, bool priorizar_grupos)
+{
+    bool seguir_buscando = true;
+    while (seguir_buscando)
+    {
+        bool encontrado = priorizar_grupos ? buscar_mejor_grupo(mano, banco, puntos) || buscar_mejor_escalera(mano, banco, puntos) : buscar_mejor_escalera(mano, banco, puntos) || buscar_mejor_grupo(mano, banco, puntos);
+
+        seguir_buscando = encontrado;
+    }
+}
+
+// Busca combinación mixta óptima y la añade al banco
+void buscar_combinacion_mixta(mano_t *mano, banco_de_apeadas_t *banco, int *puntos)
+{
+    // Primero buscamos grupos que usen números con múltiples cartas
+    for (int i = 0; i < mano->cantidad - 2; i++)
+    {
+        if (mano->cartas[i].numero == 0)
+            continue;
+
+        int contador = 1;
+        for (int j = i + 1; j < mano->cantidad; j++)
+        {
+            if (mano->cartas[j].numero == mano->cartas[i].numero)
+            {
+                contador++;
+            }
+        }
+
+        if (contador >= 2)
+        {
+            buscar_mejor_grupo(mano, banco, puntos);
+        }
+    }
+
+    // Luego buscamos escaleras con colores que tengan secuencias
+    for (int i = 0; i < mano->cantidad - 2; i++)
+    {
+        if (mano->cartas[i].numero == 0)
+            continue;
+
+        for (int j = i + 1; j < mano->cantidad - 1; j++)
+        {
+            if (strcmp(mano->cartas[i].color, mano->cartas[j].color) == 0)
+            {
+                buscar_mejor_escalera(mano, banco, puntos);
+            }
+        }
+    }
+}
+
+/* ---------------------- FUNCIÓN PRINCIPAL PARA CREAR APEADA ---------------------- */
+
+banco_de_apeadas_t crear_mejor_apeada(jugador_t *jugador)
+{
+    banco_de_apeadas_t mejor_banco;
+    banco_inicializar(&mejor_banco);
+
+    int max_puntos = 0;
+
+    // Probar diferentes estrategias
+    for (int estrategia = 0; estrategia < 3; estrategia++)
+    {
+        // Crear una copia temporal de la mano del jugador
+        mano_t mano_temp;
+        mano_inicializar(&mano_temp, jugador->mano.capacidad);
+        memcpy(mano_temp.cartas, jugador->mano.cartas, jugador->mano.cantidad * sizeof(carta_t));
+        mano_temp.cantidad = jugador->mano.cantidad;
+
+        banco_de_apeadas_t banco_temp;
+        banco_inicializar(&banco_temp);
+        int puntos_temp = 0;
+
+        switch (estrategia)
+        {
+        case 0:
+            buscar_combinaciones(&mano_temp, &banco_temp, &puntos_temp, true);
+            break;
+        case 1:
+            buscar_combinaciones(&mano_temp, &banco_temp, &puntos_temp, false);
+            break;
+        case 2:
+            buscar_combinacion_mixta(&mano_temp, &banco_temp, &puntos_temp);
+            break;
+        }
+
+        if (puntos_temp > max_puntos)
+        {
+            max_puntos = puntos_temp;
+            // Liberar el anterior mejor banco
+            banco_liberar(&mejor_banco);
+            // Asignar el nuevo
+            mejor_banco = banco_temp;
+            // Ahora necesitamos actualizar la mano del jugador
+            memcpy(jugador->mano.cartas, mano_temp.cartas, mano_temp.cantidad * sizeof(carta_t));
+            jugador->mano.cantidad = mano_temp.cantidad;
+        }
+        else
+        {
+            banco_liberar(&banco_temp);
+        }
+
+        mano_liberar(&mano_temp);
+    }
+
+    return mejor_banco;
+}
+
+/* ---------------------- FUNCIONES PARA EMBONAR ---------------------- */
+
+// Verifica si una carta puede ser agregada a un grupo existente
+bool puede_embonar_grupo(const carta_t *carta, const grupo_t *grupo)
+{
+    // Si el grupo ya tiene el máximo de cartas
+    if (grupo->cantidad >= MAX_CARTAS_GRUPO)
+        return false;
+
+    // Buscar el número base del grupo (ignorando comodines)
+    int numero_base = -1;
+    for (int i = 0; i < grupo->cantidad; i++)
+    {
+        if (grupo->cartas[i].numero != 0)
+        {
+            numero_base = grupo->cartas[i].numero;
+            break;
+        }
+    }
+
+    // Si todas son comodines, cualquier carta puede unirse
+    if (numero_base == -1)
+        return true;
+
+    // La carta debe coincidir con el número base o ser comodín
+    return (carta->numero == numero_base || carta->numero == 0);
+}
+
+// Verifica si una carta puede ser agregada a una escalera existente
+bool puede_embonar_escalera(const carta_t *carta, const escalera_t *escalera)
+{
+    // Si la escalera ya tiene el máximo de cartas
+    if (escalera->cantidad >= MAX_CARTAS_ESCALERA)
+        return false;
+
+    // Buscar color base y valores existentes
+    char color_base[MAX_COLOR] = "";
+    int valores[MAX_CARTAS_ESCALERA];
+    int num_valores = 0;
+    int comodines = 0;
+
+    for (int i = 0; i < escalera->cantidad; i++)
+    {
+        if (escalera->cartas[i].numero == 0)
+        {
+            comodines++;
+        }
+        else
+        {
+            if (strlen(color_base) == 0)
+            {
+                strcpy(color_base, escalera->cartas[i].color);
+            }
+            valores[num_valores++] = escalera->cartas[i].numero;
+        }
+    }
+
+    // Si no hay cartas no-comodín, cualquier carta del mismo color puede unirse
+    if (num_valores == 0)
+    {
+        return (strcmp(carta->color, color_base) == 0 || strlen(color_base) == 0);
+    }
+
+    // Verificar color
+    if (strcmp(carta->color, color_base) != 0 && carta->numero != 0)
+    {
+        return false;
+    }
+
+    // Ordenar valores
+    for (int i = 0; i < num_valores - 1; i++)
+    {
+        for (int j = i + 1; j < num_valores; j++)
+        {
+            if (valores[i] > valores[j])
+            {
+                int temp = valores[i];
+                valores[i] = valores[j];
+                valores[j] = temp;
+            }
+        }
+    }
+
+    // Verificar si la carta puede encajar en la secuencia
+    if (carta->numero != 0)
+    { // No es comodín
+        // Verificar si el número ya existe
+        for (int i = 0; i < num_valores; i++)
+        {
+            if (valores[i] == carta->numero)
+            {
+                return false;
+            }
+        }
+
+        // Verificar extremos
+        if (carta->numero == valores[0] - 1 || carta->numero == valores[num_valores - 1] + 1)
+        {
+            return true;
+        }
+
+        // Verificar huecos internos
+        for (int i = 0; i < num_valores - 1; i++)
+        {
+            if (carta->numero > valores[i] && carta->numero < valores[i + 1])
+            {
+                return true;
+            }
+        }
+    }
+    else
+    {                // Es comodín
+        return true; // Comodín siempre puede agregarse
+    }
+
+    return false;
+}
+
+// Intenta mover un comodín de un grupo a otro lugar para liberar espacio
+bool mover_comodin_para_embonar(banco_de_apeadas_t *banco, const carta_t *carta)
+{
+    // Buscar comodines en grupos
+    for (int g = 0; g < banco->total_grupos; g++)
+    {
+        grupo_t *grupo = &banco->grupos[g];
+
+        // Buscar comodines en este grupo
+        for (int i = 0; i < grupo->cantidad; i++)
+        {
+            if (grupo->cartas[i].numero == 0)
+            { // Es comodín
+                // Intentar mover este comodín a una escalera
+                for (int e = 0; e < banco->total_escaleras; e++)
+                {
+                    escalera_t *escalera = &banco->escaleras[e];
+
+                    if (escalera->cantidad < MAX_CARTAS_ESCALERA)
+                    {
+                        // Mover comodín del grupo a la escalera
+                        carta_t comodin = grupo->cartas[i];
+
+                        // Eliminar comodín del grupo
+                        for (int j = i; j < grupo->cantidad - 1; j++)
+                        {
+                            grupo->cartas[j] = grupo->cartas[j + 1];
+                        }
+                        grupo->cantidad--;
+
+                        // Agregar comodín a la escalera
+                        escalera->cartas[escalera->cantidad++] = comodin;
+
+                        // Ahora intentar embonar la carta original en el grupo
+                        if (puede_embonar_grupo(carta, grupo))
+                        {
+                            return true;
+                        }
+
+                        // Si no funciona, revertir el movimiento
+                        // Devolver comodín al grupo
+                        grupo->cartas[grupo->cantidad++] = comodin;
+                        // Quitar de la escalera
+                        escalera->cantidad--;
+
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Buscar comodines en escaleras
+    for (int e = 0; e < banco->total_escaleras; e++)
+    {
+        escalera_t *escalera = &banco->escaleras[e];
+
+        // Buscar comodines en esta escalera
+        for (int i = 0; i < escalera->cantidad; i++)
+        {
+            if (escalera->cartas[i].numero == 0)
+            { // Es comodín
+                // Intentar mover este comodín a un grupo
+                for (int g = 0; g < banco->total_grupos; g++)
+                {
+                    grupo_t *grupo = &banco->grupos[g];
+
+                    if (grupo->cantidad < MAX_CARTAS_GRUPO)
+                    {
+                        // Mover comodín de la escalera al grupo
+                        carta_t comodin = escalera->cartas[i];
+
+                        // Eliminar comodín de la escalera
+                        for (int j = i; j < escalera->cantidad - 1; j++)
+                        {
+                            escalera->cartas[j] = escalera->cartas[j + 1];
+                        }
+                        escalera->cantidad--;
+
+                        // Agregar comodín al grupo
+                        grupo->cartas[grupo->cantidad++] = comodin;
+
+                        // Ahora intentar embonar la carta original en la escalera
+                        if (puede_embonar_escalera(carta, escalera))
+                        {
+                            return true;
+                        }
+
+                        // Si no funciona, revertir el movimiento
+                        // Devolver comodín a la escalera
+                        escalera->cartas[escalera->cantidad++] = comodin;
+                        // Quitar del grupo
+                        grupo->cantidad--;
+
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+// Función principal para embonar una carta del jugador al banco
+bool embonar_carta(jugador_t *jugador, banco_de_apeadas_t *banco, int indice_carta)
+{
+    if (indice_carta < 0 || indice_carta >= jugador->mano.cantidad)
+    {
+        return false;
+    }
+
+    carta_t carta = jugador->mano.cartas[indice_carta];
+    bool embonada = false;
+
+    // Primero intentar embonar en grupos existentes
+    for (int i = 0; i < banco->total_grupos; i++)
+    {
+        if (puede_embonar_grupo(&carta, &banco->grupos[i]))
+        {
+            // Agregar carta al grupo
+            banco->grupos[i].cartas[banco->grupos[i].cantidad++] = carta;
+            // Eliminar carta de la mano
+            remover_cartas(&jugador->mano, &indice_carta, 1);
+            embonada = true;
+            break;
+        }
+    }
+
+    // Si no se pudo embonar en grupos, intentar con escaleras
+    if (!embonada)
+    {
+        for (int i = 0; i < banco->total_escaleras; i++)
+        {
+            if (puede_embonar_escalera(&carta, &banco->escaleras[i]))
+            {
+                // Agregar carta a la escalera
+                banco->escaleras[i].cartas[banco->escaleras[i].cantidad++] = carta;
+                // Eliminar carta de la mano
+                remover_cartas(&jugador->mano, &indice_carta, 1);
+                embonada = true;
+                break;
+            }
+        }
+    }
+
+    // Si aún no se pudo embonar, intentar mover comodines
+    if (!embonada)
+    {
+        embonada = mover_comodin_para_embonar(banco, &carta);
+        if (embonada)
+        {
+            // Si se movió un comodín, ahora agregar la carta
+            for (int i = 0; i < banco->total_grupos; i++)
+            {
+                if (puede_embonar_grupo(&carta, &banco->grupos[i]))
+                {
+                    banco->grupos[i].cartas[banco->grupos[i].cantidad++] = carta;
+                    remover_cartas(&jugador->mano, &indice_carta, 1);
+                    break;
+                }
+            }
+            for (int i = 0; i < banco->total_escaleras; i++)
+            {
+                if (puede_embonar_escalera(&carta, &banco->escaleras[i]))
+                {
+                    banco->escaleras[i].cartas[banco->escaleras[i].cantidad++] = carta;
+                    remover_cartas(&jugador->mano, &indice_carta, 1);
                     break;
                 }
             }
         }
     }
 
-    if (puntos_apeada >= PUNTOS_MINIMOS_APEADA)
+    return embonada;
+}
+
+// Función para que el jugador intente embonar todas las cartas posibles
+void jugador_embonar_cartas(jugador_t *jugador, banco_de_apeadas_t *banco)
+{
+    bool seguir_embonando = true;
+    while (seguir_embonando)
     {
-        printf("Jugador %d hizo apeada válida! Puntos: %d\n", jugador->id, puntos_apeada);
-        pcbs[jugador->id - 1].puntos += puntos_apeada;
+        bool embonada_algo = false;
+
+        // Intentar embonar cada carta (empezando por la última para evitar problemas con índices)
+        for (int i = jugador->mano.cantidad - 1; i >= 0; i--)
+        {
+            if (embonar_carta(jugador, banco, i))
+            {
+                embonada_algo = true;
+                // Reiniciar el bucle porque los índices han cambiado
+                break;
+            }
+        }
+
+        seguir_embonando = embonada_algo;
     }
 }
 
-int determinar_ganador() {
-    for (int i = 0; i < NUM_JUGADORES; i++) {
-        if (jugadores[i].mano.cantidad == 0 && pcbs[i].cartas_robadas == 0) {
-            printf("\n¡Jugador %d - %s gana!\n", jugadores[i].id, jugadores[i].nombre);
+/* ---------------------- FUNCIONES PARA DETERMINAR GANADOR ---------------------- */
+
+// Calcula los puntos totales en la mano de un jugador
+int calcular_puntos_mano(const mano_t *mano)
+{
+    int puntos = 0;
+    for (int i = 0; i < mano->cantidad; i++)
+    {
+        // Comodines valen 20 puntos
+        if (mano->cartas[i].numero == 0)
+        {
+            puntos += 20;
+        }
+        // Cartas normales valen su valor numérico
+        else
+        {
+            puntos += mano->cartas[i].numero;
+        }
+    }
+    return puntos;
+}
+
+// Verifica si un jugador ha ganado (se quedó sin cartas)
+bool jugador_ha_ganado(const jugador_t *jugador)
+{
+    return jugador->mano.cantidad == 0;
+}
+
+// Determina el índice del jugador ganador
+int determinar_ganador(jugador_t *jugadores, int num_jugadores, bool mazo_vacio)
+{
+    // Primero verificar si algún jugador se quedó sin cartas
+    for (int i = 0; i < num_jugadores; i++)
+    {
+        if (jugador_ha_ganado(&jugadores[i]))
+        {
             return i;
         }
     }
-    return -1; // No hay ganador aún
-}
 
-int determinar_ganador_por_puntaje() {
-    int ganador = -1;
-    int menor_puntaje = INT_MAX;
-    for (int i = 0; i < NUM_JUGADORES; i++) {
-        if (pcbs[i].puntos < menor_puntaje) {
-            menor_puntaje = pcbs[i].puntos;
-            ganador = i;
+    // Si el mazo está vacío, determinar por menor puntaje
+    if (mazo_vacio)
+    {
+        int indice_ganador = 0;
+        int menor_puntaje = calcular_puntos_mano(&jugadores[0].mano);
+
+        for (int i = 1; i < num_jugadores; i++)
+        {
+            int puntaje_actual = calcular_puntos_mano(&jugadores[i].mano);
+            if (puntaje_actual < menor_puntaje)
+            {
+                menor_puntaje = puntaje_actual;
+                indice_ganador = i;
+            }
         }
+        return indice_ganador;
     }
-    return ganador;
+
+    // Si no hay ganador aún
+    return -1;
 }
 
 // ----------------------------------------------------------------------
