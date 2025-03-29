@@ -9,10 +9,6 @@
 #include <fcntl.h>
 #include <limits.h>
 
-
-void iniciar_concurrencia(); // Prototipo de la función
-void* jugador_thread(void* arg); // Prototipo de la funciónlea
-
 // ----------------------------------------------------------------------
 // Macros
 // ----------------------------------------------------------------------
@@ -109,6 +105,16 @@ typedef struct
     int cantidad;
 } mazo_t;
 
+void iniciar_concurrencia(); // Prototipo de la función
+void* jugador_thread(void* arg); // Prototipo de la funciónlea
+// Prototipos de funciones
+bool es_grupo_valido(const carta_t cartas[], int cantidad);
+bool es_escalera_valida(const carta_t cartas[], int cantidad);
+void remover_carta(mano_t *mano, int pos);
+int calcular_puntos_grupo(const carta_t grupo[], int cantidad);
+int calcular_puntos_escalera(const carta_t escalera[], int cantidad);
+
+
 // ----------------------------------------------------------------------
 // Variables Globales Únicas
 // ----------------------------------------------------------------------
@@ -129,6 +135,115 @@ int num_bloqueados = 0;
 // ----------------------------------------------------------------------
 // Funciones de Validación y Cálculo de Puntos (LOGICA)
 // ----------------------------------------------------------------------
+
+void banco_inicializar(banco_de_apeadas_t *banco) {
+    banco->grupos = malloc(sizeof(grupo_t) * MAX_GRUPOS);
+    banco->escaleras = malloc(sizeof(escalera_t) * MAX_ESCALERAS);
+    banco->total_grupos = 0;
+    banco->total_escaleras = 0;
+}
+
+void mano_inicializar(mano_t *mano, int capacidad) {
+    mano->cartas = malloc(sizeof(carta_t) * capacidad);
+    mano->cantidad = 0;
+    mano->capacidad = capacidad;
+}
+
+void banco_liberar(banco_de_apeadas_t *banco) {
+    free(banco->grupos);
+    free(banco->escaleras);
+}
+
+void mano_liberar(mano_t *mano) {
+    free(mano->cartas);
+}
+
+void verificar_apeadas(jugador_t *jugador) {
+    mano_t *mano = &(jugador->mano);
+    int puntos_apeada = 0;
+    int cartas_apeadas = 0;
+
+    // Buscar grupos en la mano
+    for (int i = 0; i < mano->cantidad - 2; i++) {
+        for (int j = i + 1; j < mano->cantidad - 1; j++) {
+            for (int k = j + 1; k < mano->cantidad; k++) {
+                carta_t grupo[3] = {mano->cartas[i], mano->cartas[j], mano->cartas[k]};
+                if (es_grupo_valido(grupo, 3)) {
+                    int puntos = calcular_puntos_grupo(grupo, 3);
+                    puntos_apeada += puntos;
+                    cartas_apeadas += 3;
+
+                    // Agregar grupo al banco de apeadas
+                    if (banco_apeadas.total_grupos < MAX_GRUPOS) {
+                        if (banco_apeadas.grupos == NULL) {
+                            banco_apeadas.grupos = malloc(sizeof(grupo_t) * MAX_GRUPOS);
+                        }
+                        memcpy(banco_apeadas.grupos[banco_apeadas.total_grupos].cartas, grupo, sizeof(grupo));
+                        banco_apeadas.grupos[banco_apeadas.total_grupos].cantidad = 3;
+                        banco_apeadas.total_grupos++;
+                    }
+
+                    // Eliminar cartas de la mano
+                    remover_carta(mano, k);
+                    remover_carta(mano, j);
+                    remover_carta(mano, i);
+                    pcbs[jugador->id - 1].grupos_formados++;
+                    i = -1;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Buscar escaleras en la mano
+    for (int i = 0; i < mano->cantidad - 2; i++) {
+        for (int j = i + 1; j < mano->cantidad - 1; j++) {
+            for (int k = j + 1; k < mano->cantidad; k++) {
+                carta_t escalera[3] = {mano->cartas[i], mano->cartas[j], mano->cartas[k]};
+                if (es_escalera_valida(escalera, 3)) {
+                    int puntos = calcular_puntos_escalera(escalera, 3);
+                    puntos_apeada += puntos;
+                    cartas_apeadas += 3;
+
+                    // Agregar escalera al banco de apeadas
+                    if (banco_apeadas.total_escaleras < MAX_ESCALERAS) {
+                        memcpy(banco_apeadas.escaleras[banco_apeadas.total_escaleras].cartas, escalera, sizeof(escalera));
+                        banco_apeadas.escaleras[banco_apeadas.total_escaleras].cantidad = 3;
+                        banco_apeadas.total_escaleras++;
+                    }
+
+                    // Eliminar cartas de la mano
+                    remover_carta(mano, k);
+                    remover_carta(mano, j);
+                    remover_carta(mano, i);
+                    pcbs[jugador->id - 1].escaleras_formadas++;
+                    i = -1;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Verificar si el jugador puede apearse por primera vez
+    if (jugador->puntos_suficientes == 0 && puntos_apeada >= PUNTOS_MINIMOS_APEADA) {
+        printf("Jugador %d hizo apeada válida por primera vez! Puntos: %d\n", jugador->id, puntos_apeada);
+        jugador->puntos_suficientes = 1; // Marca que ya cumplió la regla de los 30 puntos
+        pcbs[jugador->id - 1].puntos += puntos_apeada;
+    } else if (jugador->puntos_suficientes == 0) {
+        printf("Jugador %d no tiene suficientes puntos para apearse por primera vez.\n", jugador->id);
+    } else if (puntos_apeada > 0) {
+        printf("Jugador %d hizo apeada válida! Puntos: %d\n", jugador->id, puntos_apeada);
+        pcbs[jugador->id - 1].puntos += puntos_apeada;
+    }
+
+    // Opción para apeada manual
+    printf("¿Desea realizar una apeada manual? (1: Sí, 0: No): ");
+    int opcion;
+    scanf("%d", &opcion);
+    if (opcion == 1) {
+        apearse(jugador);
+    }
+}
 
 // Verifica si un conjunto de cartas forma un grupo válido
 bool es_grupo_valido(const carta_t cartas[], int cantidad)
@@ -290,34 +405,12 @@ int calcular_puntos_banco(const banco_de_apeadas_t *banco)
 /* ---------------------- MANEJO DE CARTAS ---------------------- */
 
 // Remueve cartas usadas de la mano
-void remover_cartas(mano_t *mano, const int indices[], int cantidad)
-{
-    // Ordenar índices de mayor a menor
-    int indices_ordenados[cantidad];
-    memcpy(indices_ordenados, indices, cantidad * sizeof(int));
-
-    for (int i = 0; i < cantidad - 1; i++)
-    {
-        for (int j = i + 1; j < cantidad; j++)
-        {
-            if (indices_ordenados[i] < indices_ordenados[j])
-            {
-                int temp = indices_ordenados[i];
-                indices_ordenados[i] = indices_ordenados[j];
-                indices_ordenados[j] = temp;
-            }
-        }
+void remover_carta(mano_t *mano, int pos) {
+    if (pos < 0 || pos >= mano->cantidad) return;
+    for (int i = pos; i < mano->cantidad - 1; i++) {
+        mano->cartas[i] = mano->cartas[i + 1];
     }
-
-    // Eliminar cartas
-    for (int i = 0; i < cantidad; i++)
-    {
-        for (int j = indices_ordenados[i]; j < mano->cantidad - 1; j++)
-        {
-            mano->cartas[j] = mano->cartas[j + 1];
-        }
-        mano->cantidad--;
-    }
+    mano->cantidad--;
 }
 
 /* ---------------------- BÚSQUEDA DE COMBINACIONES ---------------------- */
@@ -1473,4 +1566,56 @@ int main()
 
     printf("Juego terminado.\n");
     return 0;
-} 
+}
+
+void apearse(jugador_t *jugador) {
+    printf("Fichas para apearse:\n");
+    for (int i = 0; i < jugador->mano.cantidad; i++) {
+        printf("%d: %d de %s\n", i + 1, jugador->mano.cartas[i].numero, jugador->mano.cartas[i].color);
+    }
+
+    int num_fichas;
+    printf("¿Cuántas fichas quiere apearse? ");
+    scanf("%d", &num_fichas);
+
+    if (num_fichas < 3 || num_fichas > MAX_CARTAS_GRUPO) {
+        printf("Número inválido de fichas para apearse.\n");
+        return;
+    }
+
+    carta_t *combinacion = malloc(sizeof(carta_t) * num_fichas);
+    for (int j = 0; j < num_fichas; j++) {
+        int indice;
+        printf("Seleccione la ficha %d a apearse: ", j + 1);
+        scanf("%d", &indice);
+
+        if (indice < 1 || indice > jugador->mano.cantidad) {
+            printf("Índice inválido. Cancelando apeada.\n");
+            free(combinacion);
+            return;
+        }
+
+        combinacion[j] = jugador->mano.cartas[indice - 1];
+    }
+
+    if (es_grupo_valido(combinacion, num_fichas)) {
+        if (banco_apeadas.total_grupos >= MAX_GRUPOS) {
+            printf("No se pueden agregar más grupos al banco.\n");
+        } else {
+            banco_apeadas.grupos = realloc(banco_apeadas.grupos, sizeof(grupo_t) * (banco_apeadas.total_grupos + 1));
+            memcpy(banco_apeadas.grupos[banco_apeadas.total_grupos].cartas, combinacion, sizeof(carta_t) * num_fichas);
+            banco_apeadas.grupos[banco_apeadas.total_grupos].cantidad = num_fichas;
+            banco_apeadas.total_grupos++;
+
+            for (int j = 0; j < num_fichas; j++) {
+                remover_carta(&jugador->mano, combinacion[j].numero - 1);
+            }
+
+            printf("Apeada válida realizada.\n");
+        }
+    } else {
+        printf("La combinación seleccionada no es válida.\n");
+    }
+
+    free(combinacion);
+}
