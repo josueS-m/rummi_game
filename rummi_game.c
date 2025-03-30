@@ -719,52 +719,40 @@ void realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa) 
     if (!jugador->en_juego || jugador->mano.cantidad == 0) {
         return;
     }
-
+ 
     // Crear un banco temporal para la apeada del jugador
     banco_de_apeadas_t apeada_jugador;
     banco_inicializar(&apeada_jugador);
-
+   
     int puntos_apeada = 0;
     bool apeada_valida = false;
-
+ 
     // Si es la primera apeada del jugador, debe cumplir con el mínimo de puntos
     if (!jugador->puntos_suficientes) {
-        // Crear una copia temporal de la mano del jugador
-        mano_t mano_temp;
-        mano_inicializar(&mano_temp, jugador->mano.capacidad);
-        memcpy(mano_temp.cartas, jugador->mano.cartas, jugador->mano.cantidad * sizeof(carta_t));
-        mano_temp.cantidad = jugador->mano.cantidad;
-
+        printf("Condición primera apeada");
         // Buscar la mejor combinación que cumpla con el mínimo de puntos
         apeada_jugador = crear_mejor_apeada(jugador);
         puntos_apeada = calcular_puntos_banco(&apeada_jugador);
-
+       
         if (puntos_apeada >= PUNTOS_MINIMOS_APEADA) {
             apeada_valida = true;
             jugador->puntos_suficientes = true;
             printf("%s ha realizado su primera apeada con %d puntos!\n",
                    jugador->nombre, puntos_apeada);
-
-            // Actualizar la mano del jugador
-            memcpy(jugador->mano.cartas, mano_temp.cartas, mano_temp.cantidad * sizeof(carta_t));
-            jugador->mano.cantidad = mano_temp.cantidad;
         } else {
             // No cumple con el mínimo, no puede apear
             printf("%s no tiene combinaciones válidas para la primera apeada (necesita al menos %d puntos).\n",
                    jugador->nombre, PUNTOS_MINIMOS_APEADA);
             banco_liberar(&apeada_jugador);
-            mano_liberar(&mano_temp); // Liberar la copia temporal de la mano
             return;
         }
-
-        mano_liberar(&mano_temp); // Liberar la copia temporal de la mano
     } else {
         // Para apeadas posteriores, buscar cualquier combinación válida
         bool tiene_grupo = buscar_mejor_grupo(&jugador->mano, &apeada_jugador, &puntos_apeada);
         bool tiene_escalera = buscar_mejor_escalera(&jugador->mano, &apeada_jugador, &puntos_apeada);
-
+       
         apeada_valida = tiene_grupo || tiene_escalera;
-
+       
         if (apeada_valida) {
             printf("%s ha agregado una nueva combinación a su apeada (%d puntos).\n",
                    jugador->nombre, puntos_apeada);
@@ -774,44 +762,46 @@ void realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa) 
             banco_liberar(&apeada_jugador);
             return;
         }
+        printf("%s ha realizado una apeada con %d puntos!\n",
+               jugador->nombre, puntos_apeada);
     }
-
-    if (apeada_valida) {
+ 
+    if (apeada_valida)
+    {
         // Mostrar la apeada realizada
         mostrar_apeada(&apeada_jugador);
 
         // Si la apeada es válida, agregar las combinaciones al banco de la mesa
         pthread_mutex_lock(&mutex_mesa);
-
         // Agregar grupos al banco de la mesa
         for (int i = 0; i < apeada_jugador.total_grupos; i++) {
             if (banco_mesa->total_grupos >= MAX_GRUPOS) {
                 fprintf(stderr, "Error: No se pueden agregar más grupos al banco\n");
                 break;
             }
-
+           
             banco_mesa->grupos[banco_mesa->total_grupos] = apeada_jugador.grupos[i];
             banco_mesa->total_grupos++;
         }
-
+       
         // Agregar escaleras al banco de la mesa
         for (int i = 0; i < apeada_jugador.total_escaleras; i++) {
             if (banco_mesa->total_escaleras >= MAX_ESCALERAS) {
                 fprintf(stderr, "Error: No se pueden agregar más escaleras al banco\n");
                 break;
             }
-
+           
             banco_mesa->escaleras[banco_mesa->total_escaleras] = apeada_jugador.escaleras[i];
             banco_mesa->total_escaleras++;
         }
-
+       
         pthread_mutex_unlock(&mutex_mesa);
     }
-
+   
     // Actualizar estadísticas del jugador
     pcbs[jugador->id - 1].grupos_formados += apeada_jugador.total_grupos;
     pcbs[jugador->id - 1].escaleras_formadas += apeada_jugador.total_escaleras;
-
+   
     // Liberar memoria del banco temporal (solo las estructuras, no las cartas)
     free(apeada_jugador.grupos);
     free(apeada_jugador.escaleras);
@@ -1261,6 +1251,16 @@ void barajar_mazo(mazo_t *mazo)
 // ----------------------------------------------------------------------
 void agregar_carta(mano_t *mano, carta_t carta) {
     if (mano->cantidad < mano->capacidad) {
+        mano->cartas[mano->cantidad] = carta;
+        mano->cantidad++;
+    } else {
+        // Si la mano está llena, aumentar la capacidad y reasignar memoria
+        mano->capacidad *= 2;
+        mano->cartas = realloc(mano->cartas, sizeof(carta_t) * mano->capacidad);
+        if (mano->cartas == NULL) {
+            fprintf(stderr, "Error al reasignar memoria para la mano\n");
+            exit(EXIT_FAILURE);
+        }
         mano->cartas[mano->cantidad] = carta;
         mano->cantidad++;
     }
