@@ -100,6 +100,21 @@ typedef struct
     int tiempo_restante;        // Tiempo en turno actual
 } pcb_t;
 
+
+// Estados posibles de un jugador
+typedef enum {
+    BLOQUEADO,
+    LISTO, 
+    EJECUTANDO
+} estado_jugador;
+
+// Estructura para gestionar estado de procesos (jugadores)
+typedef struct {
+    int id_jugador;          // ID del jugador
+    estado_jugador estado;    // Estado actual
+    int tiempo_bloqueado;    // Tiempo restante de bloqueo
+} estado_proceso;
+
 // ----------------------------------------------------------------------
 // Variables Globales
 // ----------------------------------------------------------------------
@@ -116,13 +131,25 @@ int cola_listos[NUM_JUGADORES];     // Cola de jugadores listos para jugar
 int frente = 0, final = 0;          // Índices para la cola circular
 int cola_bloqueados[NUM_JUGADORES]; // Cola de jugadores bloqueados
 int num_bloqueados = 0;             // Contador de jugadores bloqueados
+pthread_t hilo_juego;            // Hilo del juego
+pthread_cond_t cond_turno = PTHREAD_COND_INITIALIZER; // Variable de condición para el juego
+int proceso_en_ejecucion = -1; // ID del proceso en ejecución
+int tiempo_restante_quantum = 0; // Tiempo restante del proceso en ejecución
 
+estado_proceso estados_jugadores[NUM_JUGADORES];  // Array de estados de jugadores
+mazo_t mazo; // Mazo de cartas
+int num_listos = 0; // Número de jugadores en la cola de listos
 // ----------------------------------------------------------------------
 // Funciones de inicializacion y liberacion
 // ----------------------------------------------------------------------
 
 // Prototipos de funciones
 void mano_inicializar(mano_t *mano, int capacidad);
+int kbhit();
+void agregar_a_cola_listos(int id_jugador);
+int siguiente_turno();
+void reiniciar_cola_listos();
+//void *jugador_thread(void *arg);
 
 // Inicializa una mano con una capacidad específica
 void mano_inicializar(mano_t *mano, int capacidad)
@@ -199,7 +226,6 @@ void liberar_jugadores()
     for (int i = 0; i < NUM_JUGADORES; i++)
     {
         free(jugadores[i].mano.cartas); // Liberar memoria dinámica de las cartas
-        jugadores[i].mano.cartas = NULL;
         jugadores[i].mano.cantidad = 0;
         jugadores[i].mano.capacidad = 0;
     }
@@ -1395,44 +1421,250 @@ void repartir_cartas(jugador_t jugadores[], int num_jugadores, mazo_t *mazo)
 // ----------------------------------------------------------------------
 // Funciones de Concurrencia y Manejo de Turnos
 // ----------------------------------------------------------------------
+
+// Hilo principal que controla el estado global del juego
+void* hilo_juego_func(void* arg) {
+    while(1) {
+        pthread_mutex_lock(&mutex);
+        
+        // Detectar ganador continuamente
+        int ganador = determinar_ganador(jugadores, NUM_JUGADORES, mazo.cantidad == 0);
+        if(ganador != -1) {
+            printf("\n¡Jugador %d (%s) ha ganado!\n", jugadores[ganador].id, jugadores[ganador].nombre);
+            
+            // Actualizar estadísticas de todos los jugadores
+            for(int i = 0; i < NUM_JUGADORES; i++) {
+                pcbs[i].partidas_jugadas++;
+                if(i == ganador) pcbs[i].partidas_ganadas++;
+                else pcbs[i].partidas_perdidas++;
+                escribir_pcb(pcbs[i]);
+            }
+            
+            actualizar_tabla_procesos(pcbs, NUM_JUGADORES);
+            exit(0);
+        }
+        
+        // Cambiar política de planificación con teclas F/R
+        if(kbhit()) {
+            char c = getchar();
+            if(c == 'F' || c == 'f') modo = 'F';
+            else if(c == 'R' || c == 'r') modo = 'R';
+            printf("\nPolítica cambiada a %c\n", modo);
+        }
+        
+        pthread_mutex_unlock(&mutex);
+        sleep(1);  // Revisar estado cada segundo
+    }
+    return NULL;
+}
+
+// Hilo que gestiona la asignación de turnos y políticas
+void* planificador(void* arg) {
+    while(1) {
+        pthread_mutex_lock(&mutex);
+        
+        // Actualizar tiempo de bloqueo de jugadores
+        for(int i = 0; i < NUM_JUGADORES; i++) {
+            if(estados_jugadores[i].estado == BLOQUEADO) {
+                if(--estados_jugadores[i].tiempo_bloqueado <= 0) {
+                    estados_jugadores[i].estado = LISTO;
+                    agregar_a_cola_listos(estados_jugadores[i].id_jugador);
+                }
+            }
+        }
+        
+        // Asignar nuevo turno si no hay nadie ejecutando
+        if(proceso_en_ejecucion == -1) {
+            int siguiente = siguiente_turno();
+            if(siguiente != -1) {
+                proceso_en_ejecucion = siguiente;
+                estados_jugadores[siguiente-1].estado = EJECUTANDO;
+                tiempo_restante_quantum = QUANTUM;
+                pthread_cond_signal(&cond_turno);  // Notificar al jugador
+            }
+        }
+        
+        // Manejar quantum en Round Robin
+        if(modo == 'R' && proceso_en_ejecucion != -1) {
+            if(--tiempo_restante_quantum <= 0) {
+                estados_jugadores[proceso_en_ejecucion-1].estado = LISTO;
+                agregar_a_cola_listos(proceso_en_ejecucion);
+                proceso_en_ejecucion = -1;
+            }
+        }
+        
+        pthread_mutex_unlock(&mutex);
+        sleep(1);  // Intervalo de planificación
+    }
+}
+
+// ----------------------------------------------------------------------
+// Función del hilo del jugador
+// ----------------------------------------------------------------------
+
+// Función que ejecuta cada hilo de jugador
+void* jugador_thread(void* arg) {
+    jugador_t* jugador = (jugador_t*)arg;
+    pcb_t* pcb = &pcbs[jugador->id - 1];
+    
+    while(1) {
+        pthread_mutex_lock(&mutex);
+        
+        // Esperar hasta que sea su turno
+        while(proceso_en_ejecucion != jugador->id || !jugador->en_juego) {
+            pthread_cond_wait(&cond_turno, &mutex);
+        }
+        
+        // --- INICIO DEL TURNO ---
+        printf("\n=== TURNO JUGADOR %d (%s) ===\n", jugador->id, jugador->nombre);
+        mostrar_mano(&jugador->mano);
+        
+        // Menú de acciones
+        int opcion;
+        printf("\n1. Robar carta\n2. Hacer apeada\n3. Embonar carta\n4. Descartar carta\n> ");
+        scanf("%d", &opcion);
+        
+        // Procesar acción seleccionada
+        switch(opcion) {
+            case 1:  // Robar carta
+                if(mazo.cantidad > 0) {
+                    carta_t nueva = mazo.cartas[--mazo.cantidad];
+                    agregar_carta(&jugador->mano, nueva);
+                    pcb->cartas_robadas++;
+                    printf("Robaste: %d de %s\n", nueva.numero, nueva.color);
+                } else {
+                    printf("¡No hay cartas en el mazo!\n");
+                    // Bloquear jugador si no puede robar
+                    estados_jugadores[jugador->id-1].estado = BLOQUEADO;
+                    estados_jugadores[jugador->id-1].tiempo_bloqueado = rand() % 5 + 1;
+                    printf("Jugador %d bloqueado por %d segundos\n", 
+                           jugador->id, estados_jugadores[jugador->id-1].tiempo_bloqueado);
+                }
+                break;
+                
+            case 2:  // Hacer apeada
+                if(jugador->mano.cantidad > 0) {
+                    realizar_apeada_optima(jugador, &banco_apeadas);
+                } else {
+                    printf("No tienes cartas para hacer apeada\n");
+                }
+                break;
+                
+            case 3:  // Embonar carta
+                if(banco_apeadas.total_grupos > 0 || banco_apeadas.total_escaleras > 0) {
+                    printf("Seleccione carta para embonar (1-%d): ", jugador->mano.cantidad);
+                    int pos;
+                    scanf("%d", &pos);
+                    if(pos >= 1 && pos <= jugador->mano.cantidad) {
+                        if(embonar_carta(jugador, &banco_apeadas, pos-1)) {
+                            printf("¡Carta embonada con éxito!\n");
+                        } else {
+                            printf("No se pudo embonar la carta\n");
+                        }
+                    } else {
+                        printf("Posición inválida\n");
+                    }
+                } else {
+                    printf("No hay combinaciones en la mesa para embonar\n");
+                }
+                break;
+                
+            case 4:  // Descartar carta
+                if(jugador->mano.cantidad > 0) {
+                    printf("Seleccione carta a descartar (1-%d): ", jugador->mano.cantidad);
+                    int pos;
+                    scanf("%d", &pos);
+                    if(pos >= 1 && pos <= jugador->mano.cantidad) {
+                        remover_carta(&jugador->mano, pos-1);
+                        pcb->cartas_descartadas++;
+                        printf("Carta descartada\n");
+                    } else {
+                        printf("Posición inválida\n");
+                    }
+                } else {
+                    printf("No tienes cartas para descartar\n");
+                }
+                break;
+                
+            default:
+                printf("Opción inválida\n");
+        }
+        
+        // --- FINALIZACIÓN DEL TURNO ---
+        // Actualizar PCB
+        pcb->cartas_en_mano = jugador->mano.cantidad;
+        pcb->turnos_jugados++;
+        
+        // Manejar finalización según política
+        if(modo == 'F') {  // FCFS: termina turno completo
+            estados_jugadores[jugador->id-1].estado = LISTO;
+            agregar_a_cola_listos(jugador->id);
+            proceso_en_ejecucion = -1;
+        } 
+        // En Round Robin, el planificador maneja el quantum
+        
+        // Verificar si el jugador ganó
+        if(jugador->mano.cantidad == 0) {
+            printf("¡Jugador %d se ha quedado sin cartas!\n", jugador->id);
+            jugador->en_juego = false;
+            estados_jugadores[jugador->id-1].estado = BLOQUEADO;  // Ya no participa
+        }
+        
+        pthread_mutex_unlock(&mutex);
+        usleep(100000);  // Pequeña pausa para evitar congestión
+    }
+    return NULL;
+}
+
 void agregar_a_cola_listos(int id_jugador)
 {
-    if ((final + 1) % NUM_JUGADORES == frente)
+    if (num_listos == NUM_JUGADORES)
     {
         printf("Cola llena. No se puede agregar al jugador %d\n", id_jugador);
         return;
     }
     cola_listos[final] = id_jugador;
     final = (final + 1) % NUM_JUGADORES;
+    num_listos++;
 }
 
 int siguiente_turno()
 {
-    if (frente == final)
+    if (num_listos == 0)
     {
         return -1; // Cola vacía
     }
-    int intentos = NUM_JUGADORES;
-    while (intentos > 0)
-    {
-        int id = cola_listos[frente];
-        if (pcbs[id - 1].estado == 1) // Listo
-        {
-            return id;
-        }
-        frente = (frente + 1) % NUM_JUGADORES;
-        intentos--;
-    }
-    return -1; // No hay jugadores listos     
-    
+    int id = cola_listos[frente];
+    frente = (frente + 1) % NUM_JUGADORES;
+    num_listos--; // Actualizar el número de jugadores en la cola
+    return id;
 }
 
-void mover_a_cola_bloqueados(int id_jugador)
+void reiniciar_cola_listos()
 {
-    cola_bloqueados[num_bloqueados] = id_jugador;
-    num_bloqueados++;
-    pcbs[id_jugador - 1].estado = 0;                        // Bloqueado
-    pcbs[id_jugador - 1].tiempo_restante = rand() % 10 + 1; // Tiempo aleatorio
+    // Reiniciar los índices de la cola circular
+    frente = 0;
+    final = 0;
+    num_listos = 0; // Reiniciar el contador de jugadores en la cola
+
+    // Agregar todos los jugadores en juego a la cola de listos
+    for (int i = 0; i < NUM_JUGADORES; i++)
+    {
+        if (jugadores[i].en_juego)
+        {
+            cola_listos[final] = jugadores[i].id;
+            final = (final + 1) % NUM_JUGADORES;
+            num_listos++;
+        }
+    }
+    printf("Cola de listos reiniciada. Jugadores en cola: %d\n", num_listos);
+}
+
+void mover_a_cola_bloqueados(int id_jugador) {
+    estados_jugadores[id_jugador-1].estado = BLOQUEADO;
+    estados_jugadores[id_jugador-1].tiempo_bloqueado = rand() % 10 + 1;
+    pcbs[id_jugador - 1].estado = 0;
+    printf("Jugador %d bloqueado por %d segundos\n", id_jugador, estados_jugadores[id_jugador-1].tiempo_bloqueado);
 }
 
 void verificar_cola_bloqueados()
@@ -1457,80 +1689,6 @@ void verificar_cola_bloqueados()
     }
 }
 
-// ----------------------------------------------------------------------
-// Función del hilo del jugador
-// ----------------------------------------------------------------------
-
-void *jugador_thread(void *arg)
-{
-    jugador_t *jugador = (jugador_t *)arg;
-    pcb_t *pcb = &pcbs[jugador->id - 1];
-
-    while (1)
-    {
-        pthread_mutex_lock(&mutex_mesa); // Bloquear acceso a la mesa
-
-        if (turno_actual == jugador->id)
-        {
-            printf("Turno del Jugador %d - %s\n", jugador->id, jugador->nombre);
-
-            // Verificar si el jugador puede apearse
-            realizar_apeada_optima(jugador, &banco_apeadas); // Pasar el banco de apeadas
-
-            // Simular acción del jugador
-            if (jugador->mano.cantidad > 0)
-            {
-                printf("Jugador %d, elige la posición de la carta que deseas bajar (1-%d):\n", jugador->id, jugador->mano.cantidad);
-                mostrar_mano(&(jugador->mano));
-
-                int posicion;
-                scanf("%d", &posicion);
-
-                // Validar la posición ingresada
-                if (posicion >= 1 && posicion <= jugador->mano.cantidad)
-                {
-                    printf("Jugador %d baja la carta en la posición %d.\n", jugador->id, posicion);
-                    remover_carta(&(jugador->mano), posicion - 1); // Restar 1 porque las posiciones en el array empiezan en 0
-                    pcb->cartas_descartadas++;
-                }
-                else
-                {
-                    printf("Posición inválida. No se baja ninguna carta.\n");
-                }
-            }
-            else
-            {
-                printf("Jugador %d no tiene cartas. Moviendo a E/S.\n", jugador->id);
-                mover_a_cola_bloqueados(jugador->id);
-            }
-
-            // Actualizar PCB
-            pcb->cartas_en_mano = jugador->mano.cantidad;
-            pcb->estado = 1; // Listo
-
-            // Reinserta al jugador en la cola si sigue en el juego
-            if (jugador->mano.cantidad > 0)
-            {
-                agregar_a_cola_listos(jugador->id);
-            }
-
-            // Cambiar turno al siguiente jugador
-            turno_actual = siguiente_turno();
-            if (turno_actual == -1)
-            {
-                printf("No hay más jugadores en la cola. Fin del juego.\n");
-                pthread_mutex_unlock(&mutex_mesa);
-                break; // Fin del juego
-            }
-        }
-
-        pthread_mutex_unlock(&mutex_mesa); // Liberar acceso a la mesa
-        sleep(1);                          // Simular tiempo de procesamiento
-    }
-
-    return NULL;
-}
-
 void iniciar_concurrencia()
 {
     pthread_t hilos[NUM_JUGADORES];
@@ -1552,7 +1710,7 @@ void iniciar_concurrencia()
 // Funciones para Algoritmos de Planificación (FCFS y Round Robin)
 // ----------------------------------------------------------------------
 
-// Función para capturar teclas sin bloqueo
+// Función para capturar teclas sin bloqueo 
 int kbhit()
 {
     struct termios oldt, newt;
@@ -1624,25 +1782,49 @@ void *manejar_turnos(void *arg)
             continue;
         }
 
-        int jugador_id = cola_listos[frente];
-        frente = (frente + 1) % NUM_JUGADORES;
-        turno_actual = jugador_id;
+        int jugador_id;
 
-        printf("Turno del jugador: %s (ID: %d)\n", jugadores[jugador_id - 1].nombre, jugador_id);
-        jugadores[jugador_id - 1].tiempo_restante = QUANTUM;
-
-        // Simulación del turno
-        while (jugadores[jugador_id - 1].tiempo_restante > 0)
+        // Seleccionar el jugador según el modo de planificación
+        if (modo == 'F') // FCFS
         {
-            sleep(1);
-            jugadores[jugador_id - 1].tiempo_restante--;
+            jugador_id = cola_listos[frente]; // Tomar el jugador al frente de la cola
+            frente = (frente + 1) % NUM_JUGADORES; // Avanzar el frente
+        }
+        else if (modo == 'R') // Round Robin
+        {
+            jugador_id = cola_listos[frente]; // Tomar el jugador al frente de la cola
+            frente = (frente + 1) % NUM_JUGADORES; // Avanzar el frente
+
+            // Reinsertar al final de la cola si sigue en juego
+            if (jugadores[jugador_id - 1].en_juego)
+            {
+                cola_listos[final] = jugador_id;
+                final = (final + 1) % NUM_JUGADORES;
+            }
         }
 
-        printf("Tiempo agotado para el jugador %s\n", jugadores[jugador_id - 1].nombre);
+        turno_actual = jugador_id;
+        jugador_t *jugador_actual = &jugadores[jugador_id - 1];
 
-        // Después del turno, moverlo al final de la cola
-        cola_listos[final] = jugador_id;
-        final = (final + 1) % NUM_JUGADORES;
+        printf("Turno del jugador: %s (ID: %d)\n", jugador_actual->nombre, jugador_id);
+
+        // Verificar si el jugador tiene tiempo restante
+        if (jugador_actual->tiempo_restante <= 0)
+        {
+            printf("Jugador %s ha perdido su turno por falta de tiempo.\n", jugador_actual->nombre);
+            pthread_mutex_unlock(&mutex);
+            continue; // Pasar al siguiente jugador
+        }
+
+        // Simulación del turno
+        int tiempo_juego = (modo == 'R' && jugador_actual->tiempo_restante > QUANTUM) ? QUANTUM : jugador_actual->tiempo_restante;
+        sleep(tiempo_juego);
+        jugador_actual->tiempo_restante -= tiempo_juego;
+
+        if (jugador_actual->tiempo_restante <= 0)
+        {
+            printf("Tiempo agotado para el jugador %s\n", jugador_actual->nombre);
+        }
 
         pthread_mutex_unlock(&mutex);
         sleep(1);
@@ -1658,8 +1840,7 @@ int main()
     // Inicialización del juego
     srand(time(NULL)); // Para generación de números aleatorios
 
-    // 1. Inicializar mazo y banco de apeadas
-    mazo_t mazo;
+    // 1. Inicializar mazo y banco de apeadas    
     inicializar_mazo(&mazo);
     barajar_mazo(&mazo);
     banco_inicializar(&banco_apeadas);
@@ -1768,8 +1949,54 @@ int main()
                 break;
 
             case 2: // Apeada
+            if (jugador_actual->mano.cantidad > 0)
+            {
                 realizar_apeada_optima(jugador_actual, &banco_apeadas);
-                break;
+        
+                // Verificar si la apeada fue válida
+                if (jugador_actual->puntos_suficientes)
+                {
+                    printf("Apeada válida realizada. Turno finalizado.\n");
+        
+                    // Pasar el turno al siguiente jugador
+                    turno_actual = siguiente_turno();
+                    if (turno_actual == -1)
+                    {
+                        printf("Todos los jugadores han pasado. Reiniciando turnos.\n");
+                        reiniciar_cola_listos(); // Reiniciar la cola de listos
+                        turno_actual = siguiente_turno(); // Obtener el primer jugador de la nueva cola
+                    }
+                }
+                else
+                {
+                    // Si no tiene apeadas válidas, robar una carta
+                    if (mazo.cantidad > 0)
+                    {
+                        carta_t robada = mazo.cartas[--mazo.cantidad];
+                        agregar_carta(&(jugador_actual->mano), robada);
+                        pcbs[turno_actual - 1].cartas_robadas++;
+                        printf("No se pudo realizar una apeada válida. Robaste: %d de %s\n", robada.numero, robada.color);
+                    }
+                    else
+                    {
+                        printf("¡Mazo vacío! No se puede robar carta.\n");
+                    }
+        
+                    // Pasar el turno al siguiente jugador
+                    turno_actual = siguiente_turno();
+                    if (turno_actual == -1)
+                    {
+                        printf("Todos los jugadores han pasado. Reiniciando turnos.\n");
+                        reiniciar_cola_listos(); // Reiniciar la cola de listos
+                        turno_actual = siguiente_turno(); // Obtener el primer jugador de la nueva cola
+                    }
+                }
+            }
+            else
+            {
+                printf("No tienes cartas para hacer apeada.\n");
+            }
+            break;
 
             case 3: // Embonar
                 if (banco_apeadas.total_grupos > 0 || banco_apeadas.total_escaleras > 0)
@@ -1806,7 +2033,16 @@ int main()
 
             case 5: // Pasar
                 printf("Turno pasado\n");
-                break;
+
+                // Rotar turno al siguiente jugador
+                turno_actual = siguiente_turno();
+                if (turno_actual == -1)
+                {
+                    printf("Todos los jugadores han pasado. Reiniciando turnos.\n");
+                    reiniciar_cola_listos(); // Reiniciar la cola de listos
+                    turno_actual = siguiente_turno(); // Obtener el primer jugador de la nueva cola
+                }
+                break;                
 
             default:
                 printf("Opción inválida\n");
@@ -1822,15 +2058,7 @@ int main()
             if (turno_actual == -1)
             {
                 printf("Todos los jugadores han pasado. Reiniciando turnos.\n");
-                frente = 0; // Reiniciar índices de la cola
-                final = 0;
-                for (int i = 0; i < NUM_JUGADORES; i++)
-                {
-                    if (jugadores[i].en_juego)
-                    {
-                        agregar_a_cola_listos(jugadores[i].id);
-                    }
-                }
+                reiniciar_cola_listos(); // Reiniciar la cola de listos
                 turno_actual = siguiente_turno(); // Obtener el primer jugador de la nueva cola
             }
 
