@@ -934,7 +934,6 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa) 
         return false;
     }
 
-    printf("22222222222222222222\n");
     apeada_t apeada_jugador = crear_mejor_apeada(jugador);
     int puntos_apeada = calcular_puntos_apeada(&apeada_jugador);
 
@@ -960,10 +959,8 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa) 
 
     // Mostrar detalles de la apeada
     mostrar_apeada(&apeada_jugador);
-    printf("5555555555555\n");
     // Bloquear acceso concurrente al banco
     //pthread_mutex_lock(&mutex_mesa); por alguna razon revienta 
-    printf("5555555555555\n");
     
     // Transferir grupos al banco
     for (int i = 0; i < apeada_jugador.total_grupos && banco_mesa->total_grupos < MAX_GRUPOS; i++) {
@@ -1558,7 +1555,7 @@ void actualizar_tabla_procesos(pcb_t jugadores[], int num_jugadores)
 }
 
 // ----------------------------------------------------------------------
-// Función para repartir cartas entre jugadores
+// Función para repartir cartas entre jugadores y mostrar banco de apeadas
 // ----------------------------------------------------------------------
 void repartir_cartas(jugador_t jugadores[], int num_jugadores, mazo_t *mazo)
 {
@@ -1574,6 +1571,54 @@ void repartir_cartas(jugador_t jugadores[], int num_jugadores, mazo_t *mazo)
         }
     }
     mazo->cantidad -= index; // El resto queda en la banca
+}
+
+// Muestra los grupos y escaleras del banco de apeadas
+void mostrar_banco(const banco_de_apeadas_t *banco) {
+    if (banco == NULL) {
+        printf("El banco de apeadas está vacío.\n");
+        return;
+    }
+
+    printf("\n=== Banco de Apeadas ===\n");
+
+    // Mostrar grupos
+    if (banco->total_grupos > 0) {
+        printf("\n── Grupos ──\n");
+        for (int i = 0; i < banco->total_grupos; i++) {
+            printf("Grupo %d: ", i + 1);
+            for (int j = 0; j < banco->grupos[i].cantidad; j++) {
+                if (banco->grupos[i].cartas[j].numero == 0) {
+                    printf("[Comodín] ");
+                } else {
+                    printf("[%d %s] ", banco->grupos[i].cartas[j].numero, banco->grupos[i].cartas[j].color);
+                }
+            }
+            printf("\n");
+        }
+    } else {
+        printf("No hay grupos en el banco.\n");
+    }
+
+    // Mostrar escaleras
+    if (banco->total_escaleras > 0) {
+        printf("\n── Escaleras ──\n");
+        for (int i = 0; i < banco->total_escaleras; i++) {
+            printf("Escalera %d: ", i + 1);
+            for (int j = 0; j < banco->escaleras[i].cantidad; j++) {
+                if (banco->escaleras[i].cartas[j].numero == 0) {
+                    printf("[Comodín] ");
+                } else {
+                    printf("[%d %s] ", banco->escaleras[i].cartas[j].numero, banco->escaleras[i].cartas[j].color);
+                }
+            }
+            printf("\n");
+        }
+    } else {
+        printf("No hay escaleras en el banco.\n");
+    }
+
+    printf("────────────────────────────\n");
 }
 
 // ----------------------------------------------------------------------
@@ -2084,7 +2129,8 @@ int main()
             printf("2. Hacer apeada\n");
             printf("3. Embonar carta\n");
             printf("4. Descartar carta\n");
-            printf("5. Pasar turno\n");
+            printf("5. Mostrar banco apeadas\n");
+            printf("6. Pasar turno\n");
             printf("Seleccione: ");
             scanf("%d", &opcion);
 
@@ -2189,7 +2235,12 @@ int main()
                 }
                 break;
 
-            case 5: // Pasar
+            case 5: // Descartar    
+            mostrar_banco(&banco_apeadas);
+
+            break;
+
+            case 6: // Pasar
                 printf("Turno pasado\n");
 
                 // Rotar turno al siguiente jugador
