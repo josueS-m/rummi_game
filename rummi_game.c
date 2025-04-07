@@ -19,7 +19,7 @@
 // ----------------------------------------------------------------------
 #define NUM_JUGADORES 4          // Número fijo de jugadores
 #define MAX_CARTAS 108           // Total cartas en el mazo (standard para Rummy)
-#define QUANTUM 5                // Tiempo por turno en segundos
+#define QUANTUM 20                // Tiempo por turno en segundos
 #define PUNTOS_MINIMOS_APEADA 30 // Mínimo para primera apeada
 
 #define CARTAS_INICIALES 14 // Cartas al repartir (puede variar según reglas)
@@ -177,6 +177,7 @@ int calcular_puntos_apeada(const apeada_t* apeada);
 void verificar_cola_bloqueados();
 bool es_grupo_valido(const carta_t cartas[], int cantidad);
 bool es_escalera_valida(const carta_t cartas[], int cantidad);
+void mostrar_robo_carta(const carta_t *carta, bool es_automatico);  // Nueva función
 
 void mano_inicializar(mano_t *mano, int capacidad) {
     if (mano == NULL || capacidad <= 0) {
@@ -1815,7 +1816,6 @@ void* hilo_juego_func(void* arg) {
 }
 
 // Hilo planificador gestiona turnos de los jugadores
-// Hilo planificador gestiona turnos de los jugadores
 void* planificador(void* arg) {
     hilo_control_t *control = (hilo_control_t*)arg;
     struct timespec timeout;
@@ -1868,7 +1868,7 @@ void* planificador(void* arg) {
                     mazo.cantidad > 0) {
                     carta_t nueva = mazo.cartas[--mazo.cantidad];
                     agregar_carta(&jugadores[proceso_en_ejecucion-1].mano, nueva);
-                    printf("Robo forzado: %d de %s\n", nueva.numero, nueva.color);
+                    mostrar_robo_carta(&nueva, true);
                     pcbs[proceso_en_ejecucion-1].cartas_robadas++;
                 }
                 
@@ -1926,7 +1926,7 @@ void* jugador_thread(void* arg) {
     while (!turno_terminado) {
         printf("\nOpciones:\n");
         printf("1. Robar carta\n2. Hacer apeada\n3. Embonar carta\n");
-        printf("4. Descartar carta\n5. Mostrar banco\n6. Pasar turno\n");
+        printf("4. Mostrar banco\n5. Pasar turno\n");
         printf("Seleccione: ");
 
         if (scanf("%d", &opcion) != 1) {
@@ -1942,7 +1942,7 @@ void* jugador_thread(void* arg) {
                     carta_t nueva = mazo.cartas[--mazo.cantidad];
                     agregar_carta(&jugador->mano, nueva);
                     mi_pcb->cartas_robadas++;
-                    printf("Robaste: %d de %s\n", nueva.numero, nueva.color);
+                    mostrar_robo_carta(&nueva, false);
 
                     robo_carta = true;
                     turno_terminado = true;  // Pasar turno después de robar
@@ -1981,33 +1981,18 @@ void* jugador_thread(void* arg) {
                         }
                     }
                 }
-                break;
+                break;            
 
-            case 4: // Descartar carta
-                if (jugador->mano.cantidad > 0) {
-                    mostrar_mano(&jugador->mano);
-                    printf("Seleccione carta a descartar (1-%d): ", jugador->mano.cantidad);
-                    int idx;
-                    if (scanf("%d", &idx) == 1 && idx > 0 && idx <= jugador->mano.cantidad) {
-                        remover_carta(&jugador->mano, idx-1);
-                        mi_pcb->cartas_descartadas++;
-                        printf("Carta descartada\n");
-
-                        turno_terminado = true;  // Pasar turno después de descartar
-                    }
-                }
-                break;
-
-            case 5: // Mostrar banco
+            case 4: // Mostrar banco
                 mostrar_banco(&banco_apeadas);
                 break;
 
-            case 6: // Pasar turno
+            case 5: // Pasar turno
                 printf("%s pasa turno\n", jugador->nombre);
                 if (!robo_carta && mazo.cantidad > 0) {
                     carta_t nueva = mazo.cartas[--mazo.cantidad];
                     agregar_carta(&jugador->mano, nueva);
-                    printf("Robaste automáticamente: %d de %s\n", nueva.numero, nueva.color);
+                    mostrar_robo_carta(&nueva, true);
                     mi_pcb->cartas_robadas++;
                 }
                 turno_terminado = true;
@@ -2031,7 +2016,7 @@ void* jugador_thread(void* arg) {
             if (!robo_carta && mazo.cantidad > 0) {
                 carta_t nueva = mazo.cartas[--mazo.cantidad];
                 agregar_carta(&jugador->mano, nueva);
-                printf("Robaste automáticamente: %d de %s\n", nueva.numero, nueva.color);
+                mostrar_robo_carta(&nueva, true);
                 mi_pcb->cartas_robadas++;
             }
             turno_terminado = true;
@@ -2247,37 +2232,45 @@ void iniciar_concurrencia()
 // ----------------------------------------------------------------------
 
 // Función para capturar teclas sin bloqueo 
-int kbhit()
-{
+int kbhit() {
     struct termios oldt, newt;
-    int ch;
-    int oldf;
+    int ch, oldf;
+
     tcgetattr(STDIN_FILENO, &oldt);
     newt = oldt;
     newt.c_lflag &= ~(ICANON | ECHO);
     tcsetattr(STDIN_FILENO, TCSANOW, &newt);
     oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
     fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+
     ch = getchar();
+
     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
     fcntl(STDIN_FILENO, F_SETFL, oldf);
-    if (ch != EOF)
-    {
+
+    if (ch != EOF) {
         ungetc(ch, stdin);
         return 1;
     }
     return 0;
 }
 
-// FCFS: Ejecuta el turno completo del jugador
-void *ejecutarFCFS(void *arg)
-{
-    jugador_t *jugador = (jugador_t *)arg;
+// FCFS: Ejecuta el turno completo del jugador sin interrupciones
+void *ejecutarFCFS(void *arg) {
+    jugador_t *jugador = (jugador_t *)arg;    
     pthread_mutex_lock(&mutex);
-    if (jugador->en_juego)
-    {
+
+    if (jugador->en_juego) {
         printf("Jugador %d juega su turno completo.\n", jugador->id);
-        sleep(3);
+        while (jugador->en_juego)
+        {
+            printf("Turno del jugador %d (%s)\n", jugador->id, jugador->nombre);
+            mostrar_mano(&jugador->mano);
+            printf("Jugando...\n");
+            
+            jugador_thread(jugador); // Llamar a la función del hilo del jugador
+        }
+        printf("Jugador %d termina su turno.\n", jugador->id);
     }
     pthread_mutex_unlock(&mutex);
     return NULL;
@@ -2290,8 +2283,7 @@ void *ejecutarRoundRobin(void *arg)
     pthread_mutex_lock(&mutex);
     if (jugador->en_juego)
     {
-        int tiempo_juego = (jugador->tiempo_restante > QUANTUM) ? QUANTUM : jugador->tiempo_restante;
-        printf("Jugador %d juega por %d unidades de tiempo.\n", jugador->id, tiempo_juego);
+        int tiempo_juego = (jugador->tiempo_restante > QUANTUM) ? QUANTUM : jugador->tiempo_restante;        
         sleep(tiempo_juego);
         jugador->tiempo_restante -= tiempo_juego;
         if (jugador->tiempo_restante <= 0)
@@ -2304,7 +2296,7 @@ void *ejecutarRoundRobin(void *arg)
 }
 
 
- //Muestra el estado actual del juego
+ //Muestra el             estado actual del juego
 void mostrar_estado_juego() {
     pthread_mutex_lock(&mutex);
     
@@ -2520,4 +2512,12 @@ int main() {
     pthread_cond_destroy(&cond_turno);
 
     return 0;
+}
+
+// Función auxiliar para mostrar mensajes de robo de carta
+void mostrar_robo_carta(const carta_t *carta, bool es_automatico) {
+    printf("%s: %d de %s\n", 
+           es_automatico ? "Robaste automáticamente" : "Robaste",
+           carta->numero, 
+           carta->color);
 }
