@@ -19,7 +19,7 @@
 // ----------------------------------------------------------------------
 #define NUM_JUGADORES 4          // Número fijo de jugadores
 #define MAX_CARTAS 108           // Total cartas en el mazo (standard para Rummy)
-#define QUANTUM 5                // Tiempo por turno en segundos
+#define QUANTUM 20                // Tiempo por turno en segundos
 #define PUNTOS_MINIMOS_APEADA 30 // Mínimo para primera apeada
 
 #define CARTAS_INICIALES 14 // Cartas al repartir (puede variar según reglas)
@@ -1735,67 +1735,88 @@ void* planificador(void* arg) {
     hilo_control_t *control = (hilo_control_t*)arg;
     struct timespec timeout;
     struct timespec sleep_time = {0, 10000000}; // 10ms
-    while(1) {
+
+    while (1) {
         // Verificar terminación primero (con su propio mutex)
         pthread_mutex_lock(control->mutex);
-        if(*(control->terminar_flag)) {
+        if (*(control->terminar_flag)) {
             pthread_mutex_unlock(control->mutex);
             break;
         }
         pthread_mutex_unlock(control->mutex);
+
         pthread_mutex_lock(&mutex);
-        
+
         // 1. Verificar jugadores bloqueados
-        for(int i = 0; i < num_bloqueados; i++) {
+        for (int i = 0; i < num_bloqueados; i++) {
             int id = cola_bloqueados[i];
-            if(pcbs[id-1].tiempo_bloqueado > 0 && --pcbs[id-1].tiempo_bloqueado <= 0) {
-                pcbs[id-1].estado = LISTO;
+            if (pcbs[id - 1].tiempo_bloqueado > 0 && --pcbs[id - 1].tiempo_bloqueado <= 0) {
+                pcbs[id - 1].estado = LISTO;
                 agregar_a_cola_listos(id);
-                
+
                 // Eliminar de bloqueados
-                for(int j = i; j < num_bloqueados-1; j++) {
-                    cola_bloqueados[j] = cola_bloqueados[j+1];
+                for (int j = i; j < num_bloqueados - 1; j++) {
+                    cola_bloqueados[j] = cola_bloqueados[j + 1];
                 }
                 num_bloqueados--;
                 i--;
             }
         }
-        // 2. Asignar turno con timeout
-        if(proceso_en_ejecucion == -1) {
+
+        // 2. Asignar turno al siguiente jugador
+        if (proceso_en_ejecucion == -1) {
             int siguiente = siguiente_turno();
-            if(siguiente != -1) {
+            if (siguiente != -1) {
                 proceso_en_ejecucion = siguiente;
-                pcbs[siguiente-1].estado = EJECUTANDO;
-                clock_gettime(CLOCK_MONOTONIC, &timeout);
-                timeout.tv_sec += QUANTUM;
+                pcbs[siguiente - 1].estado = EJECUTANDO;
                 printf("\nTurno para Jugador %d\n", siguiente);
-                pthread_cond_signal(control->cond);
+
+                if (modo == 'R') { // Round Robin: Configurar timeout para el quantum
+                    clock_gettime(CLOCK_MONOTONIC, &timeout);
+                    timeout.tv_sec += QUANTUM;
+                }
+
+                pthread_cond_signal(control->cond); // Notificar al jugador que es su turno
             }
         }
-        // 3. Manejar quantum con espera segura
-        if(modo == 'R' && proceso_en_ejecucion != -1) {
-            int rc = pthread_cond_timedwait(control->cond, &mutex, &timeout);
-            if(rc == ETIMEDOUT) {
-                printf("Quantum agotado para Jugador %d\n", proceso_en_ejecucion);
-                
-                // Forzar robo de carta si no realizó acción
-                if (pcbs[proceso_en_ejecucion-1].cartas_robadas == 0 && 
-                    mazo.cantidad > 0) {
-                    carta_t nueva = mazo.cartas[--mazo.cantidad];
-                    agregar_carta(&jugadores[proceso_en_ejecucion-1].mano, nueva);
-                    printf("Robo forzado: %d de %s\n", nueva.numero, nueva.color);
-                    pcbs[proceso_en_ejecucion-1].cartas_robadas++;
+
+        // 3. Manejar el turno según la política de planificación
+        if (proceso_en_ejecucion != -1) {
+            if (modo == 'R') { // Round Robin
+                int rc = pthread_cond_timedwait(control->cond, &mutex, &timeout);
+                if (rc == ETIMEDOUT) {
+                    printf("Quantum agotado para Jugador %d\n", proceso_en_ejecucion);
+
+                    // Forzar robo de carta si no realizó acción
+                    if (pcbs[proceso_en_ejecucion - 1].cartas_robadas == 0 && mazo.cantidad > 0) {
+                        carta_t nueva = mazo.cartas[--mazo.cantidad];
+                        agregar_carta(&jugadores[proceso_en_ejecucion - 1].mano, nueva);
+                        printf("Robo forzado: %d de %s\n", nueva.numero, nueva.color);
+                        pcbs[proceso_en_ejecucion - 1].cartas_robadas++;
+                    }
+
+                    // Cambiar estado del proceso y agregarlo a la cola de listos
+                    pcbs[proceso_en_ejecucion - 1].estado = LISTO;
+                    agregar_a_cola_listos(proceso_en_ejecucion);
+                    proceso_en_ejecucion = -1;
+
+                    // Pasar al siguiente jugador automáticamente
+                    pthread_cond_signal(control->cond);
                 }
-                
-                // Cambiar estado del proceso y agregarlo a cola de listos
-                pcbs[proceso_en_ejecucion-1].estado = LISTO;
+            } else if (modo == 'F') { // FCFS
+                pthread_cond_wait(control->cond, &mutex); // Esperar a que el jugador termine su turno
+
+                // Reinserta al jugador al final de la cola
+                pcbs[proceso_en_ejecucion - 1].estado = LISTO;
                 agregar_a_cola_listos(proceso_en_ejecucion);
                 proceso_en_ejecucion = -1;
             }
         }
+
         pthread_mutex_unlock(&mutex);
         nanosleep(&sleep_time, NULL);
     }
+
     return NULL;
 }
 
@@ -1818,23 +1839,24 @@ void bloquear_jugador(int id_jugador, int tiempo) {
 void* jugador_thread(void* arg) {
     jugador_t* jugador = (jugador_t*)arg;
     pcb_t* mi_pcb = &pcbs[jugador->id - 1];
-    struct timespec ts;
+    struct timespec inicio_turno, tiempo_actual, timeout;
     int opcion;
 
     bool robo_carta = false;  // Bandera para controlar robo único por turno
     bool turno_terminado = false;
 
-    // Inicio del turno con timeout
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_sec += TURNO_MAXIMO;
+    pthread_mutex_lock(&mutex);
 
-    if (pthread_mutex_timedlock(&mutex, &ts) != 0) {
-        printf("%s perdió su turno por timeout\n", jugador->nombre);
-        return NULL;
-    }
-
+    // Inicio del turno
+    clock_gettime(CLOCK_REALTIME, &inicio_turno);
     printf("\n=== Turno de %s ===\n", jugador->nombre);
     mostrar_mano(&jugador->mano);
+
+    if (modo == 'R') { // Round Robin: Configurar timeout para el quantum
+        clock_gettime(CLOCK_REALTIME, &timeout);
+        timeout.tv_sec += QUANTUM;
+    }
+
     pthread_mutex_unlock(&mutex);
 
     // Menú de acciones
@@ -1861,7 +1883,6 @@ void* jugador_thread(void* arg) {
 
                     robo_carta = true;
                     turno_terminado = true;  // Pasar turno después de robar
-
                 } else {
                     printf("¡No hay cartas en el mazo!\n");
                 }
@@ -1889,7 +1910,7 @@ void* jugador_thread(void* arg) {
                     printf("Seleccione carta (1-%d): ", jugador->mano.cantidad);
                     int idx;
                     if (scanf("%d", &idx) == 1 && idx > 0 && idx <= jugador->mano.cantidad) {
-                        if (embonar_carta(jugador, &banco_apeadas, idx-1)) {
+                        if (embonar_carta(jugador, &banco_apeadas, idx - 1)) {
                             printf("¡Carta embonada con éxito!\n");
                             turno_terminado = true;  // Pasar turno después de embonar exitosamente
                         }
@@ -1903,7 +1924,7 @@ void* jugador_thread(void* arg) {
                     printf("Seleccione carta a descartar (1-%d): ", jugador->mano.cantidad);
                     int idx;
                     if (scanf("%d", &idx) == 1 && idx > 0 && idx <= jugador->mano.cantidad) {
-                        remover_carta(&jugador->mano, idx-1);
+                        remover_carta(&jugador->mano, idx - 1);
                         mi_pcb->cartas_descartadas++;
                         printf("Carta descartada\n");
 
@@ -1938,19 +1959,20 @@ void* jugador_thread(void* arg) {
             return NULL;
         }
 
-        // Verificar timeout del turno
-        clock_gettime(CLOCK_REALTIME, &ts);
-        if (ts.tv_sec >= TURNO_MAXIMO && !turno_terminado) {
-            printf("\n¡Tiempo agotado! Turno terminado.\n");
-            if (!robo_carta && mazo.cantidad > 0) {
-                carta_t nueva = mazo.cartas[--mazo.cantidad];
-                agregar_carta(&jugador->mano, nueva);
-                printf("Robaste automáticamente: %d de %s\n", nueva.numero, nueva.color);
-                mi_pcb->cartas_robadas++;
+        // Verificar timeout del turno en modo Round Robin
+        if (modo == 'R') {
+            clock_gettime(CLOCK_REALTIME, &tiempo_actual);
+            if ((tiempo_actual.tv_sec - inicio_turno.tv_sec) >= QUANTUM) {
+                printf("\n¡Quantum agotado! Turno terminado.\n");
+                if (!robo_carta && mazo.cantidad > 0) {
+                    carta_t nueva = mazo.cartas[--mazo.cantidad];
+                    agregar_carta(&jugador->mano, nueva);
+                    printf("Robaste automáticamente: %d de %s\n", nueva.numero, nueva.color);
+                    mi_pcb->cartas_robadas++;
+                }
+                turno_terminado = true;
             }
-            turno_terminado = true;
         }
-
         pthread_mutex_unlock(&mutex);
     }
 
