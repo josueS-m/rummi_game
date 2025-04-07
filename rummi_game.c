@@ -1963,6 +1963,7 @@ void* jugador_thread(void* arg) {
                         if(existe_embon_posible_aux(jugador, &banco_apeadas)){
                             //SI NO EXISTE EMBONE SE PASA DE TURNO
                             printf("¡No posees embone, pasas de turno!\n");
+                            turno_terminado = true;
                         }                      
                     }
                 } else {
@@ -2005,6 +2006,14 @@ void* jugador_thread(void* arg) {
         // Verificar si ganó
         if (jugador->mano.cantidad == 0) {
             printf("¡%s se ha quedado sin cartas y gana el juego!\n", jugador->nombre);
+            pthread_mutex_unlock(&mutex);
+            return NULL;
+        }
+
+        if (mazo.cantidad == 0) { 
+            printf("¡El mazo se ha agotado!\n");
+            int ganador = determinar_ganador(jugadores, NUM_JUGADORES, true);
+            printf("\n¡Jugador %d (%s) ha ganado!\n", jugadores[ganador].id, jugadores[ganador].nombre);
             pthread_mutex_unlock(&mutex);
             return NULL;
         }
@@ -2402,6 +2411,14 @@ void elegir_politica() {
     }
 }
 
+// Función auxiliar para mostrar mensajes de robo de carta
+void mostrar_robo_carta(const carta_t *carta, bool es_automatico) {
+    printf("%s: %d de %s\n", 
+           es_automatico ? "Robaste automáticamente" : "Robaste",
+           carta->numero, 
+           carta->color);
+}
+
 // ----------------------------------------------------------------------
 // Función Principal (Versión Mejorada)
 // ----------------------------------------------------------------------
@@ -2512,12 +2529,4 @@ int main() {
     pthread_cond_destroy(&cond_turno);
 
     return 0;
-}
-
-// Función auxiliar para mostrar mensajes de robo de carta
-void mostrar_robo_carta(const carta_t *carta, bool es_automatico) {
-    printf("%s: %d de %s\n", 
-           es_automatico ? "Robaste automáticamente" : "Robaste",
-           carta->numero, 
-           carta->color);
 }
