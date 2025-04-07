@@ -980,21 +980,72 @@ apeada_t crear_mejor_apeada(jugador_t *jugador) {
     return mejor_apeada;
 }
  
+apeada_t calcular_mejor_apeada_aux(const jugador_t *jugador) {
+    apeada_t mejor_apeada;
+    apeada_inicializar(&mejor_apeada);
+    int max_puntos = 0;
 
+    // Probar diferentes estrategias sin modificar la mano original
+    for (int estrategia = 0; estrategia < 3; estrategia++) {
+        // Crear copia temporal de la mano para pruebas
+        mano_t mano_temp;
+        mano_inicializar(&mano_temp, jugador->mano.capacidad);
+        memcpy(mano_temp.cartas, jugador->mano.cartas, jugador->mano.cantidad * sizeof(carta_t));
+        mano_temp.cantidad = jugador->mano.cantidad;
+
+        apeada_t apeada_temp;
+        apeada_inicializar(&apeada_temp);
+        int puntos_temp = 0;
+
+        // Aplicar estrategia
+        switch (estrategia) {
+            case 0: 
+                buscar_combinaciones(&mano_temp, &apeada_temp, &puntos_temp, true); 
+                break;
+            case 1: 
+                buscar_combinaciones(&mano_temp, &apeada_temp, &puntos_temp, false); 
+                break;
+            case 2: 
+                buscar_combinacion_mixta(&mano_temp, &apeada_temp, &puntos_temp); 
+                break;
+        }
+
+        // Validar si cumple mínimo para primera apeada
+        bool cumple_minimo = jugador->puntos_suficientes || puntos_temp >= PUNTOS_MINIMOS_APEADA;
+        
+        // Actualizar mejor apeada si corresponde
+        if (puntos_temp > max_puntos && cumple_minimo) {
+            apeada_liberar(&mejor_apeada);
+            mejor_apeada = apeada_temp;
+            max_puntos = puntos_temp;
+        } else {
+            apeada_liberar(&apeada_temp);
+        }
+
+        mano_liberar(&mano_temp);
+    }
+
+    return mejor_apeada;
+}
 
 bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa) {
-    if (!jugador || !banco_mesa) return false;
+    if (!jugador->en_juego || jugador->mano.cantidad < 3) {
+        printf("%s no puede realizar apeada (no está en juego o tiene muy pocas cartas).\n", 
+               jugador->nombre);
+        return false;
+    }
+
     apeada_t apeada_jugador = crear_mejor_apeada(jugador);
     int puntos_apeada = calcular_puntos_apeada(&apeada_jugador);
-    bool apeada_valida = false;
-    
+
+
+
     // Validación estricta para primera apeada
     if (!jugador->puntos_suficientes) {
         if (puntos_apeada >= PUNTOS_MINIMOS_APEADA) {
             jugador->puntos_suficientes = true;
             printf("%s ha realizado su primera apeada con %d puntos (mínimo requerido: %d)!\n",
                    jugador->nombre, puntos_apeada, PUNTOS_MINIMOS_APEADA);
-            apeada_valida = true;
         } else {
             printf("%s no alcanzó el mínimo de %d puntos para la primera apeada (obtuvo %d).\n",
                    jugador->nombre, PUNTOS_MINIMOS_APEADA, puntos_apeada);
@@ -1005,53 +1056,30 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa) 
         printf("%s no tiene combinaciones válidas para apear en este turno.\n", jugador->nombre);
         apeada_liberar(&apeada_jugador);
         return false;
-    } else {
-        apeada_valida = true;
     }
-    
-    // Bloquear acceso concurrente al banco
-    pthread_mutex_lock(&mutex_mesa);
-    
-    // Verificar límites de capacidad
-    if (banco_mesa->total_grupos >= MAX_GRUPOS || banco_mesa->total_escaleras >= MAX_ESCALERAS) {
-        pthread_mutex_unlock(&mutex_mesa);
-        apeada_liberar(&apeada_jugador);
-        return false;
-    }
+
+    // Mostrar detalles de la apeada
+    mostrar_apeada(&apeada_jugador);
     
     // Transferir grupos al banco
     for (int i = 0; i < apeada_jugador.total_grupos && banco_mesa->total_grupos < MAX_GRUPOS; i++) {
         banco_mesa->grupos[banco_mesa->total_grupos++] = apeada_jugador.grupos[i];
     }
-    
     // Transferir escaleras al banco
     for (int i = 0; i < apeada_jugador.total_escaleras && banco_mesa->total_escaleras < MAX_ESCALERAS; i++) {
         banco_mesa->escaleras[banco_mesa->total_escaleras++] = apeada_jugador.escaleras[i];
     }
-    
-    pthread_mutex_unlock(&mutex_mesa);
-    
-    // Actualizar estadísticas (protegido por otro mutex si es necesario)
-    pthread_mutex_lock(&mutex);
+
+    // Actualizar estadísticas
     pcbs[jugador->id - 1].grupos_formados += apeada_jugador.total_grupos;
     pcbs[jugador->id - 1].escaleras_formadas += apeada_jugador.total_escaleras;
     pcbs[jugador->id - 1].puntos += puntos_apeada;
-    pthread_mutex_unlock(&mutex);
-    
-    // Mostrar detalles
-    mostrar_apeada(&apeada_jugador);
-    
-    // Liberar recursos (no las cartas transferidas)
+
+    // Liberar recursos (solo estructuras, no las cartas transferidas)
     free(apeada_jugador.grupos);
     free(apeada_jugador.escaleras);
-    
-    // Forzar fin de turno después de apeada exitosa
-    if (apeada_valida) {
-        jugador->carta_agregada = true;
-        return true;
-    }
-    
-    return false;
+
+    return true;
 }
 
 // ----------------------------------------------------------------------
@@ -1362,6 +1390,63 @@ bool embonar_carta(jugador_t *jugador, banco_de_apeadas_t *banco, int indice_car
     return false; // No se pudo embonar ni crear un nuevo grupo/escalera
 }
 
+
+// Verifica si una carta puede embonar en algún grupo o escalera del banco
+bool existe_embon_posible_aux(const jugador_t *jugador, const banco_de_apeadas_t *banco) {
+    // 1. Verificar embón en grupos/escaleras existentes
+    for (int i = 0; i < jugador->mano.cantidad; i++) {
+        const carta_t *carta = &jugador->mano.cartas[i];
+
+        // Verificar grupos
+        for (int g = 0; g < banco->total_grupos; g++) {
+            if (puede_embonar_grupo(carta, &banco->grupos[g])) {
+                return true;
+            }
+        }
+
+        // Verificar escaleras
+        for (int e = 0; e < banco->total_escaleras; e++) {
+            if (puede_embonar_escalera(carta, &banco->escaleras[e])) {
+                return true;
+            }
+        }
+    }
+
+    // 2. Verificar si puede crear nuevos grupos/escaleras (solo si hay espacio)
+    if (banco->total_grupos < MAX_GRUPOS || banco->total_escaleras < MAX_ESCALERAS) {
+        for (int i = 0; i < jugador->mano.cantidad; i++) {
+            const carta_t *carta = &jugador->mano.cartas[i];
+
+            // Crear nuevo grupo (necesita al menos 2 cartas iguales + comodines)
+            if (banco->total_grupos < MAX_GRUPOS) {
+                int contador = 0;
+                for (int j = 0; j < jugador->mano.cantidad; j++) {
+                    if (i != j && (jugador->mano.cartas[j].numero == carta->numero || 
+                                   jugador->mano.cartas[j].numero == 0)) {
+                        contador++;
+                        if (contador >= 2) return true; // 2 cartas iguales o 1 + comodín
+                    }
+                }
+            }
+
+            // Crear nueva escalera (necesita cartas consecutivas del mismo color)
+            if (banco->total_escaleras < MAX_ESCALERAS) {
+                for (int j = 0; j < jugador->mano.cantidad; j++) {
+                    if (i != j && strcmp(jugador->mano.cartas[j].color, carta->color) == 0) {
+                        int diff = abs(jugador->mano.cartas[j].numero - carta->numero);
+                        if (diff <= 2 || diff == 12) { // Ej: Q-K-A o 2-3-4
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+/* CREO QUE NO ES NECESARIO YA QUE NO HAY EMPLEMENTACION EN LA LOGICA
 // Función para que el jugador intente embonar todas las cartas posibles
 void jugador_embonar_cartas(jugador_t *jugador, banco_de_apeadas_t *banco) {
     bool embonada_algo = true;
@@ -1377,7 +1462,7 @@ void jugador_embonar_cartas(jugador_t *jugador, banco_de_apeadas_t *banco) {
             }
         }
     }
-}
+}*/
 
 // ----------------------------------------------------------------------
 // Funciones para determinar un ganador
@@ -1869,15 +1954,17 @@ void* jugador_thread(void* arg) {
 
             case 2: // Hacer apeada
                 if (puede_hacer_apeada(jugador)) {
-                    apeada_t apeada = crear_mejor_apeada(jugador);
+                    apeada_t apeada = calcular_mejor_apeada_aux(jugador);
                     if (realizar_apeada_optima(jugador, &banco_apeadas)) {
                         mi_pcb->grupos_formados += apeada.total_grupos;
                         mi_pcb->escaleras_formadas += apeada.total_escaleras;
                         printf("¡Apeada exitosa!\n");
 
-                        turno_terminado = true;  // Pasar turno después de apeada
+                        if(existe_embon_posible_aux(jugador, &banco_apeadas)){
+                            //SI NO EXISTE EMBONE SE PASA DE TURNO
+                            printf("¡No posees embone, pasas de turno!\n");
+                        }                      
                     }
-                    apeada_liberar(&apeada);
                 } else {
                     printf("No puedes hacer apeada aún\n");
                 }
@@ -1891,7 +1978,6 @@ void* jugador_thread(void* arg) {
                     if (scanf("%d", &idx) == 1 && idx > 0 && idx <= jugador->mano.cantidad) {
                         if (embonar_carta(jugador, &banco_apeadas, idx-1)) {
                             printf("¡Carta embonada con éxito!\n");
-                            turno_terminado = true;  // Pasar turno después de embonar exitosamente
                         }
                     }
                 }
