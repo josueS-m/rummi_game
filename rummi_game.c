@@ -1981,7 +1981,7 @@ void* jugador_thread(void* arg) {
                         printf("¡Apeada exitosa!\n");
                         mostrar_apeada(&apeada);
 
-                        if(modo == 'F' && !existe_embon_posible_aux(jugador, &banco_apeadas)) {
+                        if(modo == 'F' && existe_embon_posible_aux(jugador, &banco_apeadas)) {
                             turno_activo = false;
                         }
                     }
@@ -2006,11 +2006,8 @@ void* jugador_thread(void* arg) {
                                 if(embonar_carta(jugador, &banco_apeadas, idx)) {
                                     printf("¡Carta embonada con éxito!\n");
 
-                                    apeada_t posible_apeada = calcular_mejor_apeada_aux(jugador);
-
-                                    if(modo == 'F' && (posible_apeada.total_grupos == 0 && posible_apeada.total_escaleras == 0)) {
+                                    if(modo == 'F') {
                                         turno_activo = false;
-                                        apeada_liberar(&posible_apeada);
                                     }
                                 } else {
                                     printf("No se pudo embonar la carta\n");
