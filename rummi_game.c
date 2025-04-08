@@ -1076,8 +1076,8 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa) 
             printf("%s ha realizado su primera apeada con %d puntos (mínimo requerido: %d)!\n",
                    jugador->nombre, puntos_apeada, PUNTOS_MINIMOS_APEADA);
         } else {
-            printf("%s no alcanzó el mínimo de %d puntos para la primera apeada (obtuvo %d).\n",
-                   jugador->nombre, PUNTOS_MINIMOS_APEADA, puntos_apeada);
+            printf("%s no alcanzó el mínimo de %d puntos para la primera apeada.\n",
+                   jugador->nombre, PUNTOS_MINIMOS_APEADA);
             apeada_liberar(&apeada_jugador);
             return false;
         }
@@ -1980,7 +1980,8 @@ void* jugador_thread(void* arg) {
                         mi_pcb->escaleras_formadas += apeada.total_escaleras;
                         printf("¡Apeada exitosa!\n");
                         mostrar_apeada(&apeada);
-                        if(modo == 'F') {
+
+                        if(modo == 'F' && !existe_embon_posible_aux(jugador, &banco_apeadas)) {
                             turno_activo = false;
                         }
                     }
@@ -2004,8 +2005,12 @@ void* jugador_thread(void* arg) {
                             if(idx >= 0 && idx < jugador->mano.cantidad) {
                                 if(embonar_carta(jugador, &banco_apeadas, idx)) {
                                     printf("¡Carta embonada con éxito!\n");
-                                    if(modo == 'F') {
+
+                                    apeada_t posible_apeada = calcular_mejor_apeada_aux(jugador);
+
+                                    if(modo == 'F' && (posible_apeada.total_grupos == 0 && posible_apeada.total_escaleras == 0)) {
                                         turno_activo = false;
+                                        apeada_liberar(&posible_apeada);
                                     }
                                 } else {
                                     printf("No se pudo embonar la carta\n");
