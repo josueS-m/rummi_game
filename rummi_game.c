@@ -19,7 +19,7 @@
 // ----------------------------------------------------------------------
 #define NUM_JUGADORES 4          // Número fijo de jugadores
 #define MAX_CARTAS 108           // Total cartas en el mazo (standard para Rummy)
-#define QUANTUM 20                // Tiempo por turno en segundos
+#define QUANTUM 5                // Tiempo por turno en segundos
 #define PUNTOS_MINIMOS_APEADA 30 // Mínimo para primera apeada
 
 #define CARTAS_INICIALES 14 // Cartas al repartir (puede variar según reglas)
@@ -177,7 +177,6 @@ int calcular_puntos_apeada(const apeada_t* apeada);
 void verificar_cola_bloqueados();
 bool es_grupo_valido(const carta_t cartas[], int cantidad);
 bool es_escalera_valida(const carta_t cartas[], int cantidad);
-void mostrar_robo_carta(const carta_t *carta, bool es_automatico);  // Nueva función
 
 void mano_inicializar(mano_t *mano, int capacidad) {
     if (mano == NULL || capacidad <= 0) {
@@ -981,72 +980,21 @@ apeada_t crear_mejor_apeada(jugador_t *jugador) {
     return mejor_apeada;
 }
  
-apeada_t calcular_mejor_apeada_aux(const jugador_t *jugador) {
-    apeada_t mejor_apeada;
-    apeada_inicializar(&mejor_apeada);
-    int max_puntos = 0;
 
-    // Probar diferentes estrategias sin modificar la mano original
-    for (int estrategia = 0; estrategia < 3; estrategia++) {
-        // Crear copia temporal de la mano para pruebas
-        mano_t mano_temp;
-        mano_inicializar(&mano_temp, jugador->mano.capacidad);
-        memcpy(mano_temp.cartas, jugador->mano.cartas, jugador->mano.cantidad * sizeof(carta_t));
-        mano_temp.cantidad = jugador->mano.cantidad;
-
-        apeada_t apeada_temp;
-        apeada_inicializar(&apeada_temp);
-        int puntos_temp = 0;
-
-        // Aplicar estrategia
-        switch (estrategia) {
-            case 0: 
-                buscar_combinaciones(&mano_temp, &apeada_temp, &puntos_temp, true); 
-                break;
-            case 1: 
-                buscar_combinaciones(&mano_temp, &apeada_temp, &puntos_temp, false); 
-                break;
-            case 2: 
-                buscar_combinacion_mixta(&mano_temp, &apeada_temp, &puntos_temp); 
-                break;
-        }
-
-        // Validar si cumple mínimo para primera apeada
-        bool cumple_minimo = jugador->puntos_suficientes || puntos_temp >= PUNTOS_MINIMOS_APEADA;
-        
-        // Actualizar mejor apeada si corresponde
-        if (puntos_temp > max_puntos && cumple_minimo) {
-            apeada_liberar(&mejor_apeada);
-            mejor_apeada = apeada_temp;
-            max_puntos = puntos_temp;
-        } else {
-            apeada_liberar(&apeada_temp);
-        }
-
-        mano_liberar(&mano_temp);
-    }
-
-    return mejor_apeada;
-}
 
 bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa) {
-    if (!jugador->en_juego || jugador->mano.cantidad < 3) {
-        printf("%s no puede realizar apeada (no está en juego o tiene muy pocas cartas).\n", 
-               jugador->nombre);
-        return false;
-    }
-
+    if (!jugador || !banco_mesa) return false;
     apeada_t apeada_jugador = crear_mejor_apeada(jugador);
     int puntos_apeada = calcular_puntos_apeada(&apeada_jugador);
-
-
-
+    bool apeada_valida = false;
+    
     // Validación estricta para primera apeada
     if (!jugador->puntos_suficientes) {
         if (puntos_apeada >= PUNTOS_MINIMOS_APEADA) {
             jugador->puntos_suficientes = true;
             printf("%s ha realizado su primera apeada con %d puntos (mínimo requerido: %d)!\n",
                    jugador->nombre, puntos_apeada, PUNTOS_MINIMOS_APEADA);
+            apeada_valida = true;
         } else {
             printf("%s no alcanzó el mínimo de %d puntos para la primera apeada (obtuvo %d).\n",
                    jugador->nombre, PUNTOS_MINIMOS_APEADA, puntos_apeada);
@@ -1057,30 +1005,53 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa) 
         printf("%s no tiene combinaciones válidas para apear en este turno.\n", jugador->nombre);
         apeada_liberar(&apeada_jugador);
         return false;
+    } else {
+        apeada_valida = true;
     }
-
-    // Mostrar detalles de la apeada
-    mostrar_apeada(&apeada_jugador);
+    
+    // Bloquear acceso concurrente al banco
+    pthread_mutex_lock(&mutex_mesa);
+    
+    // Verificar límites de capacidad
+    if (banco_mesa->total_grupos >= MAX_GRUPOS || banco_mesa->total_escaleras >= MAX_ESCALERAS) {
+        pthread_mutex_unlock(&mutex_mesa);
+        apeada_liberar(&apeada_jugador);
+        return false;
+    }
     
     // Transferir grupos al banco
     for (int i = 0; i < apeada_jugador.total_grupos && banco_mesa->total_grupos < MAX_GRUPOS; i++) {
         banco_mesa->grupos[banco_mesa->total_grupos++] = apeada_jugador.grupos[i];
     }
+    
     // Transferir escaleras al banco
     for (int i = 0; i < apeada_jugador.total_escaleras && banco_mesa->total_escaleras < MAX_ESCALERAS; i++) {
         banco_mesa->escaleras[banco_mesa->total_escaleras++] = apeada_jugador.escaleras[i];
     }
-
-    // Actualizar estadísticas
+    
+    pthread_mutex_unlock(&mutex_mesa);
+    
+    // Actualizar estadísticas (protegido por otro mutex si es necesario)
+    pthread_mutex_lock(&mutex);
     pcbs[jugador->id - 1].grupos_formados += apeada_jugador.total_grupos;
     pcbs[jugador->id - 1].escaleras_formadas += apeada_jugador.total_escaleras;
     pcbs[jugador->id - 1].puntos += puntos_apeada;
-
-    // Liberar recursos (solo estructuras, no las cartas transferidas)
+    pthread_mutex_unlock(&mutex);
+    
+    // Mostrar detalles
+    mostrar_apeada(&apeada_jugador);
+    
+    // Liberar recursos (no las cartas transferidas)
     free(apeada_jugador.grupos);
     free(apeada_jugador.escaleras);
-
-    return true;
+    
+    // Forzar fin de turno después de apeada exitosa
+    if (apeada_valida) {
+        jugador->carta_agregada = true;
+        return true;
+    }
+    
+    return false;
 }
 
 // ----------------------------------------------------------------------
@@ -1391,63 +1362,6 @@ bool embonar_carta(jugador_t *jugador, banco_de_apeadas_t *banco, int indice_car
     return false; // No se pudo embonar ni crear un nuevo grupo/escalera
 }
 
-
-// Verifica si una carta puede embonar en algún grupo o escalera del banco
-bool existe_embon_posible_aux(const jugador_t *jugador, const banco_de_apeadas_t *banco) {
-    // 1. Verificar embón en grupos/escaleras existentes
-    for (int i = 0; i < jugador->mano.cantidad; i++) {
-        const carta_t *carta = &jugador->mano.cartas[i];
-
-        // Verificar grupos
-        for (int g = 0; g < banco->total_grupos; g++) {
-            if (puede_embonar_grupo(carta, &banco->grupos[g])) {
-                return true;
-            }
-        }
-
-        // Verificar escaleras
-        for (int e = 0; e < banco->total_escaleras; e++) {
-            if (puede_embonar_escalera(carta, &banco->escaleras[e])) {
-                return true;
-            }
-        }
-    }
-
-    // 2. Verificar si puede crear nuevos grupos/escaleras (solo si hay espacio)
-    if (banco->total_grupos < MAX_GRUPOS || banco->total_escaleras < MAX_ESCALERAS) {
-        for (int i = 0; i < jugador->mano.cantidad; i++) {
-            const carta_t *carta = &jugador->mano.cartas[i];
-
-            // Crear nuevo grupo (necesita al menos 2 cartas iguales + comodines)
-            if (banco->total_grupos < MAX_GRUPOS) {
-                int contador = 0;
-                for (int j = 0; j < jugador->mano.cantidad; j++) {
-                    if (i != j && (jugador->mano.cartas[j].numero == carta->numero || 
-                                   jugador->mano.cartas[j].numero == 0)) {
-                        contador++;
-                        if (contador >= 2) return true; // 2 cartas iguales o 1 + comodín
-                    }
-                }
-            }
-
-            // Crear nueva escalera (necesita cartas consecutivas del mismo color)
-            if (banco->total_escaleras < MAX_ESCALERAS) {
-                for (int j = 0; j < jugador->mano.cantidad; j++) {
-                    if (i != j && strcmp(jugador->mano.cartas[j].color, carta->color) == 0) {
-                        int diff = abs(jugador->mano.cartas[j].numero - carta->numero);
-                        if (diff <= 2 || diff == 12) { // Ej: Q-K-A o 2-3-4
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return false;
-}
-
-/* CREO QUE NO ES NECESARIO YA QUE NO HAY EMPLEMENTACION EN LA LOGICA
 // Función para que el jugador intente embonar todas las cartas posibles
 void jugador_embonar_cartas(jugador_t *jugador, banco_de_apeadas_t *banco) {
     bool embonada_algo = true;
@@ -1463,7 +1377,7 @@ void jugador_embonar_cartas(jugador_t *jugador, banco_de_apeadas_t *banco) {
             }
         }
     }
-}*/
+}
 
 // ----------------------------------------------------------------------
 // Funciones para determinar un ganador
@@ -1816,6 +1730,7 @@ void* hilo_juego_func(void* arg) {
 }
 
 // Hilo planificador gestiona turnos de los jugadores
+// Hilo planificador gestiona turnos de los jugadores
 void* planificador(void* arg) {
     hilo_control_t *control = (hilo_control_t*)arg;
     struct timespec timeout;
@@ -1868,7 +1783,7 @@ void* planificador(void* arg) {
                     mazo.cantidad > 0) {
                     carta_t nueva = mazo.cartas[--mazo.cantidad];
                     agregar_carta(&jugadores[proceso_en_ejecucion-1].mano, nueva);
-                    mostrar_robo_carta(&nueva, true);
+                    printf("Robo forzado: %d de %s\n", nueva.numero, nueva.color);
                     pcbs[proceso_en_ejecucion-1].cartas_robadas++;
                 }
                 
@@ -1926,7 +1841,7 @@ void* jugador_thread(void* arg) {
     while (!turno_terminado) {
         printf("\nOpciones:\n");
         printf("1. Robar carta\n2. Hacer apeada\n3. Embonar carta\n");
-        printf("4. Mostrar banco\n5. Pasar turno\n");
+        printf("4. Descartar carta\n5. Mostrar banco\n6. Pasar turno\n");
         printf("Seleccione: ");
 
         if (scanf("%d", &opcion) != 1) {
@@ -1942,7 +1857,7 @@ void* jugador_thread(void* arg) {
                     carta_t nueva = mazo.cartas[--mazo.cantidad];
                     agregar_carta(&jugador->mano, nueva);
                     mi_pcb->cartas_robadas++;
-                    mostrar_robo_carta(&nueva, false);
+                    printf("Robaste: %d de %s\n", nueva.numero, nueva.color);
 
                     robo_carta = true;
                     turno_terminado = true;  // Pasar turno después de robar
@@ -1954,18 +1869,15 @@ void* jugador_thread(void* arg) {
 
             case 2: // Hacer apeada
                 if (puede_hacer_apeada(jugador)) {
-                    apeada_t apeada = calcular_mejor_apeada_aux(jugador);
+                    apeada_t apeada = crear_mejor_apeada(jugador);
                     if (realizar_apeada_optima(jugador, &banco_apeadas)) {
                         mi_pcb->grupos_formados += apeada.total_grupos;
                         mi_pcb->escaleras_formadas += apeada.total_escaleras;
                         printf("¡Apeada exitosa!\n");
 
-                        if(existe_embon_posible_aux(jugador, &banco_apeadas)){
-                            //SI NO EXISTE EMBONE SE PASA DE TURNO
-                            printf("¡No posees embone, pasas de turno!\n");
-                            turno_terminado = true;
-                        }                      
+                        turno_terminado = true;  // Pasar turno después de apeada
                     }
+                    apeada_liberar(&apeada);
                 } else {
                     printf("No puedes hacer apeada aún\n");
                 }
@@ -1979,21 +1891,37 @@ void* jugador_thread(void* arg) {
                     if (scanf("%d", &idx) == 1 && idx > 0 && idx <= jugador->mano.cantidad) {
                         if (embonar_carta(jugador, &banco_apeadas, idx-1)) {
                             printf("¡Carta embonada con éxito!\n");
+                            turno_terminado = true;  // Pasar turno después de embonar exitosamente
                         }
                     }
                 }
-                break;            
+                break;
 
-            case 4: // Mostrar banco
+            case 4: // Descartar carta
+                if (jugador->mano.cantidad > 0) {
+                    mostrar_mano(&jugador->mano);
+                    printf("Seleccione carta a descartar (1-%d): ", jugador->mano.cantidad);
+                    int idx;
+                    if (scanf("%d", &idx) == 1 && idx > 0 && idx <= jugador->mano.cantidad) {
+                        remover_carta(&jugador->mano, idx-1);
+                        mi_pcb->cartas_descartadas++;
+                        printf("Carta descartada\n");
+
+                        turno_terminado = true;  // Pasar turno después de descartar
+                    }
+                }
+                break;
+
+            case 5: // Mostrar banco
                 mostrar_banco(&banco_apeadas);
                 break;
 
-            case 5: // Pasar turno
+            case 6: // Pasar turno
                 printf("%s pasa turno\n", jugador->nombre);
                 if (!robo_carta && mazo.cantidad > 0) {
                     carta_t nueva = mazo.cartas[--mazo.cantidad];
                     agregar_carta(&jugador->mano, nueva);
-                    mostrar_robo_carta(&nueva, true);
+                    printf("Robaste automáticamente: %d de %s\n", nueva.numero, nueva.color);
                     mi_pcb->cartas_robadas++;
                 }
                 turno_terminado = true;
@@ -2010,14 +1938,6 @@ void* jugador_thread(void* arg) {
             return NULL;
         }
 
-        if (mazo.cantidad == 0) { 
-            printf("¡El mazo se ha agotado!\n");
-            int ganador = determinar_ganador(jugadores, NUM_JUGADORES, true);
-            printf("\n¡Jugador %d (%s) ha ganado!\n", jugadores[ganador].id, jugadores[ganador].nombre);
-            pthread_mutex_unlock(&mutex);
-            return NULL;
-        }
-
         // Verificar timeout del turno
         clock_gettime(CLOCK_REALTIME, &ts);
         if (ts.tv_sec >= TURNO_MAXIMO && !turno_terminado) {
@@ -2025,7 +1945,7 @@ void* jugador_thread(void* arg) {
             if (!robo_carta && mazo.cantidad > 0) {
                 carta_t nueva = mazo.cartas[--mazo.cantidad];
                 agregar_carta(&jugador->mano, nueva);
-                mostrar_robo_carta(&nueva, true);
+                printf("Robaste automáticamente: %d de %s\n", nueva.numero, nueva.color);
                 mi_pcb->cartas_robadas++;
             }
             turno_terminado = true;
@@ -2241,45 +2161,37 @@ void iniciar_concurrencia()
 // ----------------------------------------------------------------------
 
 // Función para capturar teclas sin bloqueo 
-int kbhit() {
+int kbhit()
+{
     struct termios oldt, newt;
-    int ch, oldf;
-
+    int ch;
+    int oldf;
     tcgetattr(STDIN_FILENO, &oldt);
     newt = oldt;
     newt.c_lflag &= ~(ICANON | ECHO);
     tcsetattr(STDIN_FILENO, TCSANOW, &newt);
     oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
     fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
-
     ch = getchar();
-
     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
     fcntl(STDIN_FILENO, F_SETFL, oldf);
-
-    if (ch != EOF) {
+    if (ch != EOF)
+    {
         ungetc(ch, stdin);
         return 1;
     }
     return 0;
 }
 
-// FCFS: Ejecuta el turno completo del jugador sin interrupciones
-void *ejecutarFCFS(void *arg) {
-    jugador_t *jugador = (jugador_t *)arg;    
+// FCFS: Ejecuta el turno completo del jugador
+void *ejecutarFCFS(void *arg)
+{
+    jugador_t *jugador = (jugador_t *)arg;
     pthread_mutex_lock(&mutex);
-
-    if (jugador->en_juego) {
+    if (jugador->en_juego)
+    {
         printf("Jugador %d juega su turno completo.\n", jugador->id);
-        while (jugador->en_juego)
-        {
-            printf("Turno del jugador %d (%s)\n", jugador->id, jugador->nombre);
-            mostrar_mano(&jugador->mano);
-            printf("Jugando...\n");
-            
-            jugador_thread(jugador); // Llamar a la función del hilo del jugador
-        }
-        printf("Jugador %d termina su turno.\n", jugador->id);
+        sleep(3);
     }
     pthread_mutex_unlock(&mutex);
     return NULL;
@@ -2292,7 +2204,8 @@ void *ejecutarRoundRobin(void *arg)
     pthread_mutex_lock(&mutex);
     if (jugador->en_juego)
     {
-        int tiempo_juego = (jugador->tiempo_restante > QUANTUM) ? QUANTUM : jugador->tiempo_restante;        
+        int tiempo_juego = (jugador->tiempo_restante > QUANTUM) ? QUANTUM : jugador->tiempo_restante;
+        printf("Jugador %d juega por %d unidades de tiempo.\n", jugador->id, tiempo_juego);
         sleep(tiempo_juego);
         jugador->tiempo_restante -= tiempo_juego;
         if (jugador->tiempo_restante <= 0)
@@ -2305,7 +2218,7 @@ void *ejecutarRoundRobin(void *arg)
 }
 
 
- //Muestra el             estado actual del juego
+ //Muestra el estado actual del juego
 void mostrar_estado_juego() {
     pthread_mutex_lock(&mutex);
     
@@ -2409,14 +2322,6 @@ void elegir_politica() {
         printf("\nManteniendo política actual: %s\n", 
               (modo == 'F') ? "FCFS" : "Round Robin");
     }
-}
-
-// Función auxiliar para mostrar mensajes de robo de carta
-void mostrar_robo_carta(const carta_t *carta, bool es_automatico) {
-    printf("%s: %d de %s\n", 
-           es_automatico ? "Robaste automáticamente" : "Robaste",
-           carta->numero, 
-           carta->color);
 }
 
 // ----------------------------------------------------------------------
