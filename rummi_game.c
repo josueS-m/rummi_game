@@ -1981,7 +1981,8 @@ void* jugador_thread(void* arg) {
                         printf("¡Apeada exitosa!\n");
                         mostrar_apeada(&apeada);
 
-                        if(modo == 'F' && existe_embon_posible_aux(jugador, &banco_apeadas)) {
+
+                        if(modo == 'F') {
                             turno_activo = false;
                         }
                     }
@@ -2005,7 +2006,6 @@ void* jugador_thread(void* arg) {
                             if(idx >= 0 && idx < jugador->mano.cantidad) {
                                 if(embonar_carta(jugador, &banco_apeadas, idx)) {
                                     printf("¡Carta embonada con éxito!\n");
-
                                     if(modo == 'F') {
                                         turno_activo = false;
                                     }
