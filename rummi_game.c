@@ -1025,12 +1025,7 @@ void mostrar_apeada(const apeada_t *apeada)
     printf("────────────────────────────\n");
 }
 
-/**
- * Encuentra y aplica la mejor combinación de apeada para un jugador
- * @param jugador Puntero al jugador (se modificará su mano si hay apeada válida)
- * @return Estructura apeada_t con las combinaciones creadas
- */
-
+//Funcion para encontrar el índice de una carta en la mano
 static int encontrar_indice_carta(const mano_t *mano, const carta_t *carta)
 {
     for (int i = 0; i < mano->cantidad; i++)
@@ -1655,24 +1650,6 @@ bool existe_embon_posible_aux(const jugador_t *jugador, const banco_de_apeadas_t
 
     return false;
 }
-
-/* CREO QUE NO ES NECESARIO YA QUE NO HAY EMPLEMENTACION EN LA LOGICA
-// Función para que el jugador intente embonar todas las cartas posibles
-void jugador_embonar_cartas(jugador_t *jugador, banco_de_apeadas_t *banco) {
-    bool embonada_algo = true;
-
-    while (embonada_algo) {
-        embonada_algo = false;
-
-        // Intentar embonar cada carta (de atrás hacia adelante para evitar problemas de índices)
-        for (int i = jugador->mano.cantidad - 1; i >= 0; i--) {
-            if (embonar_carta(jugador, banco, i)) {
-                embonada_algo = true;
-                break; // Reiniciar el bucle porque los índices han cambiado
-            }
-        }
-    }
-}*/
 
 // ----------------------------------------------------------------------
 // Funciones para determinar un ganador
@@ -2606,48 +2583,6 @@ int kbhit()
         return 1;
     }
     return 0;
-}
-
-// FCFS: Ejecuta el turno completo del jugador sin interrupciones
-void *ejecutarFCFS(void *arg)
-{
-    jugador_t *jugador = (jugador_t *)arg;
-    pthread_mutex_lock(&mutex);
-
-    if (jugador->en_juego)
-    {
-        printf("Jugador %d juega su turno completo.\n", jugador->id);
-        while (jugador->en_juego)
-        {
-            printf("Turno del jugador %d (%s)\n", jugador->id, jugador->nombre);
-            mostrar_mano(&jugador->mano);
-            printf("Jugando...\n");
-
-            jugador_thread(jugador); // Llamar a la función del hilo del jugador
-        }
-        printf("Jugador %d termina su turno.\n", jugador->id);
-    }
-    pthread_mutex_unlock(&mutex);
-    return NULL;
-}
-
-// Round Robin: Ejecuta un turno parcial del jugador
-void *ejecutarRoundRobin(void *arg)
-{
-    jugador_t *jugador = (jugador_t *)arg;
-    pthread_mutex_lock(&mutex);
-    if (jugador->en_juego)
-    {
-        int tiempo_juego = (jugador->tiempo_restante > QUANTUM) ? QUANTUM : jugador->tiempo_restante;
-        sleep(tiempo_juego);
-        jugador->tiempo_restante -= tiempo_juego;
-        if (jugador->tiempo_restante <= 0)
-        {
-            jugador->en_juego = false;
-        }
-    }
-    pthread_mutex_unlock(&mutex);
-    return NULL;
 }
 
 // Muestra el estado actual del juego
