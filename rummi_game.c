@@ -1921,24 +1921,13 @@ void* jugador_thread(void* arg) {
     pcb_t* mi_pcb = &pcbs[jugador->id - 1];
     struct timespec start, now;
     bool turno_activo = true;
-    
+
     clock_gettime(CLOCK_MONOTONIC, &start);
-    
+
     while(turno_activo && !juego_terminado) {
-        struct pollfd mypoll = { STDIN_FILENO, POLLIN, 0 };
-        
         pthread_mutex_lock(&mutex);
-        // Verificar tiempo
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        double elapsed = (now.tv_sec - start.tv_sec);
-        
-        if(modo == 'R' && elapsed >= QUANTUM) {
-            turno_activo = false;
-            pthread_mutex_unlock(&mutex);
-            break;
-        }
-        
-        // Mostrar menú solo una vez por iteración
+
+        // Mostrar menú
         printf("\n=== Turno de %s ===\n", jugador->nombre);
         mostrar_mano(&jugador->mano);
         printf("\nOpciones:\n");
@@ -1946,22 +1935,36 @@ void* jugador_thread(void* arg) {
         printf("4. Mostrar banco\n5. Pasar turno\n");
         printf("Seleccione (1-5): ");
         fflush(stdout);
-        
+
         pthread_mutex_unlock(&mutex);
 
-        // Esperar entrada con timeout
+        // Leer entrada mientras se verifica el tiempo
         int opcion = -1;
-        if(poll(&mypoll, 1, 100000) > 0) {
-            char input[10];
-            if(read(STDIN_FILENO, input, sizeof(input)) > 0) {
+        char input[10] = {0};
+
+        while (true) {
+            struct pollfd mypoll = { STDIN_FILENO, POLLIN, 0 };
+            int ret = poll(&mypoll, 1, 200); // 200 ms
+
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            double elapsed = (now.tv_sec - start.tv_sec);
+
+            if (modo == 'R' && elapsed >= QUANTUM) {
+                printf("\n¡Tiempo agotado para %s!\n", jugador->nombre);
+                turno_activo = false;
+                break;
+            }
+
+            if (ret > 0 && read(STDIN_FILENO, input, sizeof(input)) > 0) {
                 opcion = atoi(input);
+                break;
             }
         }
 
         pthread_mutex_lock(&mutex);
-        
+
         switch(opcion) {
-            case 1: // Robar carta
+            case 1:
                 if(mazo.cantidad > 0) {
                     carta_t nueva = mazo.cartas[--mazo.cantidad];
                     agregar_carta(&jugador->mano, nueva);
@@ -1971,8 +1974,8 @@ void* jugador_thread(void* arg) {
                     turno_activo = false;
                 }
                 break;
-                
-            case 2: // Hacer apeada
+
+            case 2:
                 if(puede_hacer_apeada(jugador)) {
                     apeada_t apeada = calcular_mejor_apeada_aux(jugador);
                     if(realizar_apeada_optima(jugador, &banco_apeadas)) {
@@ -1980,8 +1983,6 @@ void* jugador_thread(void* arg) {
                         mi_pcb->escaleras_formadas += apeada.total_escaleras;
                         printf("¡Apeada exitosa!\n");
                         mostrar_apeada(&apeada);
-
-
                         if(modo == 'F') {
                             turno_activo = false;
                         }
@@ -1991,18 +1992,28 @@ void* jugador_thread(void* arg) {
                     printf("No tienes combinaciones válidas para apear\n");
                 }
                 break;
-                
-            case 3: // Embonar carta
+
+            case 3:
                 if(jugador->mano.cantidad > 0) {
                     mostrar_mano(&jugador->mano);
                     printf("Seleccione carta (1-%d): ", jugador->mano.cantidad);
                     fflush(stdout);
-                    
+
                     struct pollfd carta_poll = { STDIN_FILENO, POLLIN, 0 };
-                    char input[10];
-                    if(poll(&carta_poll, 1, 100000) > 0) {
-                        if(read(STDIN_FILENO, input, sizeof(input)) > 0) {
-                            int idx = atoi(input) - 1; // Convertir a índice base 0
+                    char input2[10] = {0};
+                    while (true) {
+                        int ret = poll(&carta_poll, 1, 200);
+                        clock_gettime(CLOCK_MONOTONIC, &now);
+                        double elapsed = (now.tv_sec - start.tv_sec);
+
+                        if (modo == 'R' && elapsed >= QUANTUM) {
+                            printf("\n¡Tiempo agotado para %s!\n", jugador->nombre);
+                            turno_activo = false;
+                            break;
+                        }
+
+                        if (ret > 0 && read(STDIN_FILENO, input2, sizeof(input2)) > 0) {
+                            int idx = atoi(input2) - 1;
                             if(idx >= 0 && idx < jugador->mano.cantidad) {
                                 if(embonar_carta(jugador, &banco_apeadas, idx)) {
                                     printf("¡Carta embonada con éxito!\n");
@@ -2015,18 +2026,19 @@ void* jugador_thread(void* arg) {
                             } else {
                                 printf("Índice inválido\n");
                             }
+                            break;
                         }
                     }
                 } else {
                     printf("No tienes cartas para embonar\n");
-                }         
+                }
                 break;
-                
-            case 4: // Mostrar banco
+
+            case 4:
                 mostrar_banco(&banco_apeadas);
                 break;
-                
-            case 5: // Pasar turno
+
+            case 5:
                 if(!jugador->carta_agregada && mazo.cantidad > 0) {
                     carta_t nueva = mazo.cartas[--mazo.cantidad];
                     agregar_carta(&jugador->mano, nueva);
@@ -2035,62 +2047,53 @@ void* jugador_thread(void* arg) {
                 }
                 turno_activo = false;
                 break;
-                
+
             default:
                 if(opcion != -1) printf("Opción inválida. Por favor seleccione 1-5\n");
                 break;
         }
 
         pthread_mutex_unlock(&mutex);
-        
-        // Verificar fin de turno por política
-        if(modo == 'R') {
-            clock_gettime(CLOCK_MONOTONIC, &now);
-            elapsed = (now.tv_sec - start.tv_sec);
-            if(elapsed >= QUANTUM) {
-                printf("\n¡Quantum completado!\n");
-                turno_activo = false;
-            }
+
+        // Verificación final del tiempo
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double elapsed = (now.tv_sec - start.tv_sec);
+        if(modo == 'R' && elapsed >= QUANTUM) {
+            printf("\n¡Quantum completado!\n");
+            turno_activo = false;
         }
-        
-        // Actualizar tiempo restante del jugador
-        jugador->tiempo_restante = QUANTUM - (int)elapsed;       
-        
-        
+
+        jugador->tiempo_restante = QUANTUM - (int)elapsed;
+
         if(!turno_activo) {
             printf("\n=== Fin de turno de %s ===\n", jugador->nombre);
             if(modo == 'F') {
                 proceso_en_ejecucion = -1;
                 agregar_a_cola_listos(jugador->id);
-            }            
+            }
         }
 
-        // Verificar si ganó ------------------------------
+        // Verificar condiciones de victoria
         if (jugador->mano.cantidad == 0) {
             printf("¡%s se ha quedado sin cartas y gana el juego!\n", jugador->nombre);
-            //pthread_mutex_unlock(&mutex);
             return NULL;
         }
 
-        if (mazo.cantidad == 0) { 
+        if (mazo.cantidad == 0) {
             printf("¡El mazo se ha agotado!\n");
             int ganador = determinar_ganador(jugadores, NUM_JUGADORES, true);
             printf("\n¡Jugador %d (%s) ha ganado!\n", jugadores[ganador].id, jugadores[ganador].nombre);
-            //pthread_mutex_unlock(&mutex);
             return NULL;
         }
 
-
-
         if(!turno_activo) {
-            pthread_mutex_lock(&mutex);            
-            pthread_mutex_unlock(&mutex);
             break;
         }
     }
-    
+
     return NULL;
 }
+
 
 // Función para agregar a cola de listos
 void agregar_a_cola_listos(int id_jugador) {
