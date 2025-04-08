@@ -927,65 +927,21 @@ void mostrar_apeada(const apeada_t *apeada) {
     printf("────────────────────────────\n");
 }
  
-apeada_t crear_mejor_apeada(jugador_t *jugador) {
-    apeada_t mejor_apeada;
-    apeada_inicializar(&mejor_apeada);
-    int max_puntos = 0;
-    bool apeada_valida = false;
-    mano_t mejor_mano; // Guardaremos la mejor mano temporal aquí
+/**
+ * Encuentra y aplica la mejor combinación de apeada para un jugador
+ * @param jugador Puntero al jugador (se modificará su mano si hay apeada válida)
+ * @return Estructura apeada_t con las combinaciones creadas
+ */
 
-    // Inicializar mano temporal para backup
-    mano_inicializar(&mejor_mano, jugador->mano.capacidad);
-    memcpy(mejor_mano.cartas, jugador->mano.cartas, jugador->mano.cantidad * sizeof(carta_t));
-    mejor_mano.cantidad = jugador->mano.cantidad;
-
-    // Probar diferentes estrategias
-    for (int estrategia = 0; estrategia < 3; estrategia++) {
-        mano_t mano_temp;
-        mano_inicializar(&mano_temp, jugador->mano.capacidad);
-        memcpy(mano_temp.cartas, jugador->mano.cartas, jugador->mano.cantidad * sizeof(carta_t));
-        mano_temp.cantidad = jugador->mano.cantidad;
-
-        apeada_t apeada_temp;
-        apeada_inicializar(&apeada_temp);
-        int puntos_temp = 0;
-
-        // Aplicar estrategia
-        switch (estrategia) {
-            case 0: buscar_combinaciones(&mano_temp, &apeada_temp, &puntos_temp, true); break;
-            case 1: buscar_combinaciones(&mano_temp, &apeada_temp, &puntos_temp, false); break;
-            case 2: buscar_combinacion_mixta(&mano_temp, &apeada_temp, &puntos_temp); break;
+ static int encontrar_indice_carta(const mano_t *mano, const carta_t *carta) {
+    for (int i = 0; i < mano->cantidad; i++) {
+        if (memcmp(&mano->cartas[i], carta, sizeof(carta_t)) == 0) {
+            return i;
         }
-
-        // Validar apeada antes de considerar como mejor
-        bool cumple_minimo = jugador->puntos_suficientes || puntos_temp >= PUNTOS_MINIMOS_APEADA;
-        
-        if (puntos_temp > max_puntos && cumple_minimo) {
-            max_puntos = puntos_temp;
-            apeada_liberar(&mejor_apeada);
-            mejor_apeada = apeada_temp;
-            
-            // Guardar estado temporal de la mano (pero no aplicar aún)
-            memcpy(mejor_mano.cartas, mano_temp.cartas, mano_temp.cantidad * sizeof(carta_t));
-            mejor_mano.cantidad = mano_temp.cantidad;
-            apeada_valida = true;
-        } else {
-            apeada_liberar(&apeada_temp);
-        }
-
-        mano_liberar(&mano_temp);
     }
-
-    // Solo aplicar cambios a la mano real si la apeada es válida
-    if (apeada_valida) {
-        memcpy(jugador->mano.cartas, mejor_mano.cartas, mejor_mano.cantidad * sizeof(carta_t));
-        jugador->mano.cantidad = mejor_mano.cantidad;
-    }
-
-    mano_liberar(&mejor_mano);
-    return mejor_apeada;
+    return -1;
 }
- 
+
 apeada_t calcular_mejor_apeada_aux(const jugador_t *jugador) {
     apeada_t mejor_apeada;
     apeada_inicializar(&mejor_apeada);
@@ -1034,6 +990,75 @@ apeada_t calcular_mejor_apeada_aux(const jugador_t *jugador) {
     return mejor_apeada;
 }
 
+apeada_t crear_mejor_apeada(jugador_t *jugador) {
+    apeada_t mejor_apeada;
+    apeada_inicializar(&mejor_apeada);
+    
+    // Primero calcular sin modificar (versión de solo lectura)
+    apeada_t apeada_calculada = calcular_mejor_apeada_aux(jugador);
+    int puntos = calcular_puntos_apeada(&apeada_calculada);
+
+    // Verificar si cumple mínimo para primera apeada
+    bool apeada_valida = (jugador->puntos_suficientes || puntos >= PUNTOS_MINIMOS_APEADA) && 
+                         (apeada_calculada.total_grupos > 0 || apeada_calculada.total_escaleras > 0);
+
+    if (apeada_valida) {
+        // Crear copia de la mano para modificar
+        mano_t mano_temp;
+        mano_inicializar(&mano_temp, jugador->mano.capacidad);
+        memcpy(mano_temp.cartas, jugador->mano.cartas, jugador->mano.cantidad * sizeof(carta_t));
+        mano_temp.cantidad = jugador->mano.cantidad;
+
+        // Eliminar cartas usadas en la apeada
+        for (int g = 0; g < apeada_calculada.total_grupos; g++) {
+            for (int c = 0; c < apeada_calculada.grupos[g].cantidad; c++) {
+                int idx = -1;
+                // Buscar la carta en la mano (comparando todos los campos)
+                for (int i = 0; i < mano_temp.cantidad; i++) {
+                    if (memcmp(&mano_temp.cartas[i], &apeada_calculada.grupos[g].cartas[c], sizeof(carta_t)) == 0) {
+                        idx = i;
+                        break;
+                    }
+                }
+                if (idx >= 0) {
+                    remover_carta(&mano_temp, idx);
+                }
+            }
+        }
+
+        // Actualizar mano real del jugador
+        memcpy(jugador->mano.cartas, mano_temp.cartas, mano_temp.cantidad * sizeof(carta_t));
+        jugador->mano.cantidad = mano_temp.cantidad;
+        mano_liberar(&mano_temp);
+
+        // Transferir la apeada calculada a la de retorno
+        mejor_apeada = apeada_calculada;
+    } else {
+        apeada_liberar(&apeada_calculada);
+    }
+
+    return mejor_apeada;
+}
+
+// Compara dos cartas para determinar si son iguales
+bool son_cartas_iguales(const carta_t carta1, const carta_t carta2) {
+    // Comparar número y color
+    return (carta1.numero == carta2.numero && strcmp(carta1.color, carta2.color) == 0);
+}
+
+void eliminar_carta_de_mano(mano_t *mano, carta_t carta) {
+    for (int i = 0; i < mano->cantidad; i++) {
+        if (son_cartas_iguales(mano->cartas[i], carta)) {
+            // Mover las cartas restantes una posición hacia atrás
+            for (int j = i; j < mano->cantidad - 1; j++) {
+                mano->cartas[j] = mano->cartas[j + 1];
+            }
+            mano->cantidad--;
+            break;
+        }
+    }
+}
+
 bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa) {
     if (!jugador->en_juego || jugador->mano.cantidad < 3) {
         printf("%s no puede realizar apeada (no está en juego o tiene muy pocas cartas).\n", 
@@ -1043,8 +1068,6 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa) 
 
     apeada_t apeada_jugador = crear_mejor_apeada(jugador);
     int puntos_apeada = calcular_puntos_apeada(&apeada_jugador);
-
-
 
     // Validación estricta para primera apeada
     if (!jugador->puntos_suficientes) {
@@ -1064,6 +1087,21 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa) 
         return false;
     }
 
+    // --- Nuevo: Eliminar cartas usadas en la apeada de la mano del jugador ---
+    for (int i = 0; i < apeada_jugador.total_grupos; i++) {
+        grupo_t *grupo = &apeada_jugador.grupos[i];
+        for (int j = 0; j < grupo->cantidad; j++) {
+            eliminar_carta_de_mano(&jugador->mano, grupo->cartas[j]);
+        }
+    }
+
+    for (int i = 0; i < apeada_jugador.total_escaleras; i++) {
+        escalera_t *escalera = &apeada_jugador.escaleras[i];
+        for (int j = 0; j < escalera->cantidad; j++) {
+            eliminar_carta_de_mano(&jugador->mano, escalera->cartas[j]);
+        }
+    }
+
     // Mostrar detalles de la apeada
     mostrar_apeada(&apeada_jugador);
     
@@ -1071,6 +1109,7 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa) 
     for (int i = 0; i < apeada_jugador.total_grupos && banco_mesa->total_grupos < MAX_GRUPOS; i++) {
         banco_mesa->grupos[banco_mesa->total_grupos++] = apeada_jugador.grupos[i];
     }
+
     // Transferir escaleras al banco
     for (int i = 0; i < apeada_jugador.total_escaleras && banco_mesa->total_escaleras < MAX_ESCALERAS; i++) {
         banco_mesa->escaleras[banco_mesa->total_escaleras++] = apeada_jugador.escaleras[i];
@@ -1935,7 +1974,7 @@ void* jugador_thread(void* arg) {
                 
             case 2: // Hacer apeada
                 if(puede_hacer_apeada(jugador)) {
-                    apeada_t apeada = crear_mejor_apeada(jugador);
+                    apeada_t apeada = calcular_mejor_apeada_aux(jugador);
                     if(realizar_apeada_optima(jugador, &banco_apeadas)) {
                         mi_pcb->grupos_formados += apeada.total_grupos;
                         mi_pcb->escaleras_formadas += apeada.total_escaleras;
