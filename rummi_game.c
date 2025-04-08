@@ -2063,6 +2063,23 @@ void* jugador_thread(void* arg) {
             }            
         }
 
+        // Verificar si ganó ------------------------------
+        if (jugador->mano.cantidad == 0) {
+            printf("¡%s se ha quedado sin cartas y gana el juego!\n", jugador->nombre);
+            //pthread_mutex_unlock(&mutex);
+            return NULL;
+        }
+
+        if (mazo.cantidad == 0) { 
+            printf("¡El mazo se ha agotado!\n");
+            int ganador = determinar_ganador(jugadores, NUM_JUGADORES, true);
+            printf("\n¡Jugador %d (%s) ha ganado!\n", jugadores[ganador].id, jugadores[ganador].nombre);
+            //pthread_mutex_unlock(&mutex);
+            return NULL;
+        }
+
+
+
         if(!turno_activo) {
             pthread_mutex_lock(&mutex);            
             pthread_mutex_unlock(&mutex);
