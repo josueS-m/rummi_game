@@ -14,7 +14,6 @@
 #include <time.h>
 #include <errno.h>
 #include <sys/poll.h>
-#include <fcntl.h>
 
 // ----------------------------------------------------------------------
 // Macros
