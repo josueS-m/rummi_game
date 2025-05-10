@@ -20,7 +20,8 @@
 // ----------------------------------------------------------------------
 #define NUM_JUGADORES 4          // Número fijo de jugadores
 #define MAX_FICHAS 108           // Total fichas en el mazo (standard para Rummy)
-#define QUANTUM 20               // Tiempo por turno en segundos
+// Tiempo por turno en segundos (modificable)
+int QUANTUM = 20;
 #define PUNTOS_MINIMOS_APEADA 30 // Mínimo para primera apeada
 
 #define FICHAS_INICIALES 14 // Fichas al repartir (puede variar según reglas)
@@ -123,9 +124,12 @@ typedef struct
     int fichas_desfichadas;     // Fichas desfichadas
     int grupos_formados;        // Grupos creados
     int escaleras_formadas;     // Escaleras creadas
+    int apeadas_realizadas;    // <- Nuevo
+    int embones_realizados;    // <- Nuevo
     int victorias_con_escalera; // Victorias con escalera completa
     int tiempo_restante;        // Tiempo en turno actual
     int tiempo_de_espera;       // Tiempo bloqueo
+    
 } pcb_t;
 
 // Nuevo struct para pasar datos a los hilos
@@ -1210,7 +1214,7 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa)
         return false;
     }
 
-    // --- Nuevo: Eliminar fichas usadas en la apeada de la mano del jugador ---
+    // Eliminar fichas usadas en la apeada de la mano del jugador ---
     for (int i = 0; i < apeada_jugador.total_grupos; i++)
     {
         grupo_t *grupo = &apeada_jugador.grupos[i];
@@ -1248,6 +1252,13 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa)
     pcbs[jugador->id - 1].grupos_formados += apeada_jugador.total_grupos;
     pcbs[jugador->id - 1].escaleras_formadas += apeada_jugador.total_escaleras;
     pcbs[jugador->id - 1].puntos += puntos_apeada;
+
+    // Registrar victoria con escalera si aplica
+    if (apeada_jugador.total_escaleras > 0 && jugador->mano.cantidad == 0)
+    {
+        pcbs[jugador->id - 1].victorias_con_escalera++;
+        printf("\n%s ha ganado usando al menos una escalera. ¡Se registra victoria con escalera!\n", jugador->nombre);
+    }
 
     // Liberar recursos (solo estructuras, no las fichas transferidas)
     free(apeada_jugador.grupos);
@@ -1832,43 +1843,45 @@ void inicializar_jugador(jugador_t *jugador, int id, char nombre[], ficha_t fich
     }
 }
 
-void escribir_pcb(pcb_t jugador)
-{
+void escribir_pcb(pcb_t jugador) {
     char filename[30];
     sprintf(filename, "PCB_Jugador%d.txt", jugador.id_jugador);
 
     FILE *file = fopen(filename, "w");
-    if (file == NULL)
-    {
+    if (file == NULL) {
         printf("Error al abrir %s\n", filename);
         return;
     }
 
-    // Convertir el estado a texto
-    const char *estado_str = (jugador.estado == LISTO) ? "LISTO" : (jugador.estado == EJECUTANDO) ? "EJECUTANDO"
-                                                                                                  : "DE_ESPERA";
+    // Convertir estado enum a texto
+    const char *estado_str = (jugador.estado == LISTO) ? "LISTO" :
+                             (jugador.estado == EJECUTANDO) ? "EJECUTANDO" :
+                             "DE_ESPERA";
 
-    // Escribir los datos del PCB en el archivo
-    fprintf(file, "ID: %d\n", jugador.id_jugador);
+    // Escribir datos al archivo
+    fprintf(file, "===== PCB del Jugador %d =====\n", jugador.id_jugador);
     fprintf(file, "Nombre: %s\n", jugador.nombre);
+    fprintf(file, "Estado: %s\n", estado_str);
     fprintf(file, "Fichas en Mano: %d\n", jugador.fichas_en_mano);
     fprintf(file, "Puntos: %d\n", jugador.puntos);
     fprintf(file, "Partidas Jugadas: %d\n", jugador.partidas_jugadas);
     fprintf(file, "Partidas Ganadas: %d\n", jugador.partidas_ganadas);
     fprintf(file, "Partidas Perdidas: %d\n", jugador.partidas_perdidas);
-    fprintf(file, "Estado: %s\n", estado_str);
     fprintf(file, "Tiempo Total de Juego: %d\n", jugador.tiempo_total_juego);
     fprintf(file, "Turnos Jugados: %d\n", jugador.turnos_jugados);
     fprintf(file, "Fichas Robadas: %d\n", jugador.fichas_robadas);
     fprintf(file, "Fichas Desfichadas: %d\n", jugador.fichas_desfichadas);
     fprintf(file, "Grupos Formados: %d\n", jugador.grupos_formados);
     fprintf(file, "Escaleras Formadas: %d\n", jugador.escaleras_formadas);
+    fprintf(file, "Apeadas Realizadas: %d\n", jugador.apeadas_realizadas);
+    fprintf(file, "Embones Realizados: %d\n", jugador.embones_realizados);
     fprintf(file, "Victorias con Escalera: %d\n", jugador.victorias_con_escalera);
-    fprintf(file, "Tiempo Restante: %d\n", jugador.tiempo_restante);
-    fprintf(file, "Tiempo Bloqueado: %d\n", jugador.tiempo_de_espera);
+    fprintf(file, "Tiempo Restante (turno): %d\n", jugador.tiempo_restante);
+    fprintf(file, "Tiempo Bloqueado Acumulado: %d\n", jugador.tiempo_de_espera);
 
     fclose(file);
 }
+
 
 void actualizar_y_escribir_pcb(pcb_t *pcb, jugador_t *jugador)
 {
@@ -2085,6 +2098,50 @@ void *hilo_juego_func(void *arg)
     return NULL;
 }
 
+int calcular_quantum_dinamico(int jugadores_listos) {
+    int q = 20 / (jugadores_listos + 1);
+    return (q < 5) ? 5 : q;
+}
+
+void decidir_politica() {
+    int total_espera = 0, jugadores_bloqueados = 0;
+    int jugadores_listos = num_listos;
+
+    pthread_mutex_lock(&mutex_pcbs);
+    for (int i = 0; i < NUM_JUGADORES; i++) {
+        if (pcbs[i].estado == DE_ESPERA) {
+            total_espera += pcbs[i].tiempo_de_espera;
+            jugadores_bloqueados++;
+        }
+    }
+    pthread_mutex_unlock(&mutex_pcbs);
+
+    if (jugadores_bloqueados > 1 || jugadores_listos >= NUM_JUGADORES / 2) {
+        // Modo Round Robin
+        modo = 'R';
+        QUANTUM = 20 / (jugadores_listos + 1);
+        if (QUANTUM < 5) QUANTUM = 5;
+        printf("\n[Cambio] Modo RR - Quantum: %d segundos\n", QUANTUM);
+    } else {
+        // Modo FCFS con quantum dinámico
+        modo = 'F';
+        
+        // Calcular quantum basado en tiempo de espera promedio y jugadores activos
+        int promedio_espera = (jugadores_bloqueados > 0) ? 
+                             (total_espera / jugadores_bloqueados) : 0;
+                             
+        QUANTUM = 15 + (promedio_espera * 2) - (jugadores_listos * 1);
+        
+        // Aplicar límites
+        if (QUANTUM < 10) QUANTUM = 10;       // Mínimo 10s
+        else if (QUANTUM > 30) QUANTUM = 30;  // Máximo 30s
+        
+        printf("\n[Cambio] Modo FCFS - Quantum ajustado: %d segundos\n", QUANTUM);
+    }
+}
+
+
+
 // Hilo planificador gestiona turnos de los jugadores
 void *planificador(void *arg)
 {
@@ -2093,6 +2150,7 @@ void *planificador(void *arg)
 
     while (!*(control->terminar_flag))
     {
+        decidir_politica(); // Actualiza la política en cada ciclo
         pthread_mutex_lock(&mutex);
 
         if (proceso_en_ejecucion == -1)
@@ -2102,7 +2160,13 @@ void *planificador(void *arg)
             {
                 proceso_en_ejecucion = siguiente;
                 jugador_t *jugador = &jugadores[siguiente - 1];
+                
+                // Actualizar PCB al pasar a EJECUTANDO
                 pcbs[siguiente - 1].estado = EJECUTANDO;
+                escribir_pcb(pcbs[siguiente - 1]);
+                
+                printf("\n[PLANIFICADOR] Jugador %d (%s) pasa a EJECUTANDO\n", 
+                       siguiente, jugador->nombre);
 
                 pthread_t hilo_jugador;
                 pthread_create(&hilo_jugador, NULL, jugador_thread, jugador);
@@ -2115,10 +2179,21 @@ void *planificador(void *arg)
                 pthread_cond_timedwait(control->cond, &mutex, &timeout);
 
                 proceso_en_ejecucion = -1;
-                if (modo == 'R')
-                {
-                    agregar_a_cola_listos(siguiente);
-                }
+
+                // El jugador siempre pasa a DE_ESPERA, independientemente de la política
+                int tiempo_bloqueo = rand() % 30 + 5; // Entre 1-3 segundos
+                printf("\n[PLANIFICADOR] Jugador %d (%s) pasa a DE_ESPERA por %d segundos\n", 
+                       siguiente, jugador->nombre, tiempo_bloqueo);
+                
+                // La función bloquear_jugador se encarga de actualizar el PCB y la tabla
+                bloquear_jugador(siguiente, tiempo_bloqueo);
+                pcbs[siguiente-1].tiempo_total_juego += QUANTUM; //Registra tiempo de juego usado
+
+                verificar_cola_de_esperas(); 
+                // Nota: No agregamos inmediatamente a la cola de listos
+                // El jugador SIEMPRE debe pasar por DE_ESPERA primero
+                // La función verificar_cola_de_esperas se encargará de moverlo 
+                // a la cola de listos una vez que haya cumplido su tiempo de espera
             }
         }
 
@@ -2129,14 +2204,50 @@ void *planificador(void *arg)
 }
 
 // Función para bloquear jugador
-void bloquear_jugador(int id_jugador, int tiempo)
-{
-    if (num_de_esperas < NUM_JUGADORES)
-    {
-        pcbs[id_jugador - 1].estado = DE_ESPERA;
-        pcbs[id_jugador - 1].tiempo_de_espera = tiempo;
-        cola_de_esperas[num_de_esperas++] = id_jugador;
+void bloquear_jugador(int id_jugador, int tiempo) {
+    pthread_mutex_lock(&mutex_colas);
+    
+    // Paso 1: Remover de cola_listos si está presente
+    bool encontrado = false;
+    for (int i = 0; i < num_listos; i++) {
+        if (cola_listos[i] == id_jugador) {
+            // Eliminar desplazando elementos
+            for (int j = i; j < num_listos - 1; j++) {
+                cola_listos[j] = cola_listos[j + 1];
+            }
+            num_listos--;
+            encontrado = true;
+            printf("[DEBUG] Jugador %d removido de LISTOS\n", id_jugador);
+            break;
+        }
     }
+    
+    // Paso 2: Verificar si ya está en espera
+    bool ya_en_espera = false;
+    for (int i = 0; i < num_de_esperas; i++) {
+        if (cola_de_esperas[i] == id_jugador) {
+            ya_en_espera = true;
+            pcbs[id_jugador-1].tiempo_de_espera = tiempo;
+            printf("[DEBUG] Jugador %d actualizado en DE_ESPERA: %ds\n", 
+                  id_jugador, tiempo);
+            break;
+        }
+    }
+    
+    // Paso 3: Agregar a espera si no estaba
+    if (!ya_en_espera && num_de_esperas < NUM_JUGADORES) {
+        cola_de_esperas[num_de_esperas++] = id_jugador;
+        pcbs[id_jugador-1].estado = DE_ESPERA;
+        pcbs[id_jugador-1].tiempo_de_espera = tiempo;
+        printf("[DEBUG] Jugador %d -> DE_ESPERA (%ds)\n", 
+              id_jugador, tiempo);
+    }
+    
+    // Actualizaciones comunes
+    escribir_pcb(pcbs[id_jugador-1]);
+    actualizar_tabla_procesos(pcbs, NUM_JUGADORES);
+    
+    pthread_mutex_unlock(&mutex_colas);
 }
 
 // ----------------------------------------------------------------------
@@ -2182,7 +2293,7 @@ void *jugador_thread(void *arg)
             clock_gettime(CLOCK_MONOTONIC, &now);
             double elapsed = (now.tv_sec - start.tv_sec);
 
-            if (modo == 'R' && elapsed >= QUANTUM)
+            if (elapsed >= QUANTUM)
             {
                 printf("\n¡Tiempo agotado para %s!\n", jugador->nombre);
                 turno_activo = false;
@@ -2209,6 +2320,10 @@ void *jugador_thread(void *arg)
                 jugador->ficha_agregada = true;
                 turno_activo = false;
                 hizo_accion = true;
+                
+                // Actualizar PCB después de robar
+                mi_pcb->fichas_en_mano = jugador->mano.cantidad;
+                mi_pcb->fichas_robadas++;
             }
             break;
 
@@ -2221,6 +2336,11 @@ void *jugador_thread(void *arg)
                     printf("\n¡Apeada exitosa!\n");
                     mostrar_apeada(&apeada);
                     hizo_accion = true;
+                    
+                    // Actualizar PCB después de apear
+                    mi_pcb->fichas_en_mano = jugador->mano.cantidad;
+                    mi_pcb->apeadas_realizadas++;
+                    
                     if (modo == 'F')
                     {
                         turno_activo = false;
@@ -2265,6 +2385,11 @@ void *jugador_thread(void *arg)
                             {
                                 printf("\n¡Ficha embonada con éxito!\n");
                                 hizo_accion = true;
+                                
+                                // Actualizar PCB después de embonar
+                                mi_pcb->fichas_en_mano = jugador->mano.cantidad;
+                                mi_pcb->embones_realizados++;
+                                
                                 if (modo == 'F')
                                 {
                                     turno_activo = false;
@@ -2293,12 +2418,14 @@ void *jugador_thread(void *arg)
             mostrar_banco(&banco_apeadas);
             break;
 
-            case 5:
+        case 5:
             if (mazo.cantidad > 0)
             {
                 ficha_t nueva = mazo.fichas[--mazo.cantidad];
                 agregar_ficha(&jugador->mano, nueva);
                 mostrar_robo_ficha(&nueva, false);
+                
+                // Actualizar PCB al pasar turno
                 mi_pcb->fichas_en_mano = jugador->mano.cantidad;
                 mi_pcb->fichas_robadas++;
                 printf("\nHas pasado el turno y robado una ficha.\n");
@@ -2331,9 +2458,9 @@ void *jugador_thread(void *arg)
 
         clock_gettime(CLOCK_MONOTONIC, &now);
         double elapsed = (now.tv_sec - start.tv_sec);
-        if (modo == 'R' && elapsed >= QUANTUM)
+        if (elapsed >= QUANTUM)
         {
-            printf("\n¡Quantum completado!\n");
+            printf("\n¡Quantum completado para %s!\n", jugador->nombre);
             turno_activo = false;
         }
 
@@ -2342,12 +2469,16 @@ void *jugador_thread(void *arg)
         if (!turno_activo)
         {
             printf("\n=== Fin de turno de %s ===\n", jugador->nombre);
+            
+            // No es necesario actualizar el estado aquí, el planificador lo hará
+            // al finalizar el turno del jugador
         }
 
         // Verificar condiciones de victoria
         if (jugador->mano.cantidad == 0)
         {
             printf("\n¡%s se ha quedado sin fichas y gana el juego!\n", jugador->nombre);
+            juego_terminado = true;
             return NULL;
         }
 
@@ -2356,6 +2487,7 @@ void *jugador_thread(void *arg)
             printf("\n¡El mazo se ha agotado!\n");
             int ganador = determinar_ganador(jugadores, NUM_JUGADORES, true);
             printf("\n¡Jugador %d (%s) ha ganado!\n", jugadores[ganador].id, jugadores[ganador].nombre);
+            juego_terminado = true;
             return NULL;
         }
     }
@@ -2364,36 +2496,38 @@ void *jugador_thread(void *arg)
 }
 
 // Función para agregar a cola de listos
-void agregar_a_cola_listos(int id_jugador)
-{
-    pthread_mutex_lock(&mutex); // Bloquear acceso a estructuras compartidas
-
-    if (modo == 'R')
-    { // Round Robin
-        cola_listos[final] = id_jugador;
-        final = (final + 1) % NUM_JUGADORES;
+void agregar_a_cola_listos(int id_jugador) {
+    pthread_mutex_lock(&mutex_colas);
+    
+    // Verificar capacidad máxima de la cola
+    if ((final + 1) % NUM_JUGADORES == frente) {
+        printf("[ERROR] Cola de listos llena (Jugador %d)\n", id_jugador);
+        pthread_mutex_unlock(&mutex_colas);
+        return;
     }
-    else
-    { // FCFS
-        // Solo se agrega si no está ya en la cola
-        bool existe = false;
-        for (int i = frente; i != final; i = (i + 1) % NUM_JUGADORES)
-        {
-            if (cola_listos[i] == id_jugador)
-            {
-                existe = true;
-                break;
-            }
-        }
-        if (!existe)
-        {
-            cola_listos[final] = id_jugador;
-            final = (final + 1) % NUM_JUGADORES;
+    
+    // Verificar si ya está en cola
+    for (int i = frente; i != final; i = (i+1) % NUM_JUGADORES) {
+        if (cola_listos[i] == id_jugador) {
+            printf("[WARN] Jugador %d ya en LISTOS\n", id_jugador);
+            pthread_mutex_unlock(&mutex_colas);
+            return;
         }
     }
-
-    pthread_mutex_unlock(&mutex);
+    
+    // Agregar a cola
+    cola_listos[final] = id_jugador;
+    final = (final + 1) % NUM_JUGADORES;
+    
+    // Actualizar PCB
+    pcbs[id_jugador-1].estado = LISTO;
+    escribir_pcb(pcbs[id_jugador-1]);
+    
+    printf("[DEBUG] Jugador %d agregado a LISTOS\n", id_jugador);
+    
+    pthread_mutex_unlock(&mutex_colas);
 }
+
 
 // Función para inicializar PCBs
 void inicializar_pcbs()
@@ -2425,6 +2559,8 @@ void inicializar_pcbs()
         pcbs[i].fichas_desfichadas = 0;
         pcbs[i].grupos_formados = 0;
         pcbs[i].escaleras_formadas = 0;
+        pcbs[i].apeadas_realizadas = 0;
+        pcbs[i].embones_realizados = 0;
         pcbs[i].victorias_con_escalera = 0;
 
         // Agregar a la cola de listos inicial
@@ -2520,27 +2656,45 @@ void mover_a_cola_de_esperas(int id_jugador)
     printf("\nJugador %d de_espera por %d segundos\n", id_jugador, pcbs[id_jugador - 1].tiempo_de_espera);
 }
 
-void verificar_cola_de_esperas()
-{
-    for (int i = 0; i < num_de_esperas; i++)
-    {
-        pcbs[cola_de_esperas[i] - 1].tiempo_restante--;
-        if (pcbs[cola_de_esperas[i] - 1].tiempo_restante <= 0)
-        {
-            printf("\nJugador %d ha terminado su tiempo en E/S. Moviendo a la cola de listos.\n", cola_de_esperas[i]);
-            agregar_a_cola_listos(cola_de_esperas[i]);
-            pcbs[cola_de_esperas[i] - 1].estado = 1; // Listo
-
-            // Eliminar jugador de la cola de de_esperas
-            for (int j = i; j < num_de_esperas - 1; j++)
-            {
-                cola_de_esperas[j] = cola_de_esperas[j + 1];
+void verificar_cola_de_esperas() {
+    pthread_mutex_lock(&mutex_colas);
+    
+    for (int i = 0; i < num_de_esperas; i++) {
+        int id = cola_de_esperas[i];
+        
+        // Reducir tiempo y verificar
+        if (--pcbs[id-1].tiempo_de_espera <= 0) {
+            // Paso 1: Mover a listos (con verificación)
+            bool agregado = false;
+            for (int j = 0; j < num_listos; j++) {
+                if (cola_listos[j] == id) {
+                    agregado = true;
+                    break;
+                }
+            }
+            
+            if (!agregado && num_listos < NUM_JUGADORES) {
+                cola_listos[num_listos++] = id;
+                pcbs[id-1].estado = LISTO;
+                printf("[DEBUG] Jugador %d -> LISTO\n", id);
+            }
+            
+            // Paso 2: Eliminar de esperas
+            for (int j = i; j < num_de_esperas-1; j++) {
+                cola_de_esperas[j] = cola_de_esperas[j+1];
             }
             num_de_esperas--;
-            i--; // Ajustar índice después de eliminar
+            i--;  // Ajustar índice
+            
+            // Paso 3: Actualizar registros
+            escribir_pcb(pcbs[id-1]);
         }
     }
+    
+    pthread_mutex_unlock(&mutex_colas);
+    actualizar_tabla_procesos(pcbs, NUM_JUGADORES);
 }
+
 
 void iniciar_concurrencia()
 {
