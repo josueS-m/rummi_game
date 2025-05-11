@@ -37,6 +37,10 @@
 
 #define TURNO_MAXIMO 30 // 30 segundos por turno
 
+#define TAMANO_MEMORIA 1024 // Tamaño total de la memoria en KB
+#define TAMANO_BLOQUE 64    // Tamaño de cada bloque en KB
+#define NUM_BLOQUES (TAMANO_MEMORIA / TAMANO_BLOQUE)
+
 // ----------------------------------------------------------------------
 // Estructuras y Tipos
 // ----------------------------------------------------------------------
@@ -166,9 +170,161 @@ int tiempo_restante_quantum = 0;                      // Tiempo restante del pro
 mazo_t mazo;        // Mazo de fichas
 int num_listos = 0; // Número de jugadores en la cola de listos
 
+
+typedef struct {
+    int id_proceso; // ID del proceso que ocupa el bloque (-1 si está libre)
+    bool libre;     // Indica si el bloque está libre
+} bloque_t;
+
+typedef struct {
+    bloque_t bloques[NUM_BLOQUES]; // Array de bloques
+    int mapa_bits[NUM_BLOQUES];    // Mapa de bits (0 = libre, 1 = ocupado)
+} memoria_t;
+
+memoria_t memoria;
+char algoritmo_actual = 'M'; // 'M' para Mejor Ajuste, 'B' para Mapa de Bits
 // ----------------------------------------------------------------------
 // Funciones de inicializacion y liberacion
 // ----------------------------------------------------------------------
+
+
+
+//inicualizacion de memoria
+
+void inicializar_memoria(memoria_t *memoria) {
+    for (int i = 0; i < NUM_BLOQUES; i++) {
+        memoria->bloques[i].id_proceso = -1; // Sin proceso asignado
+        memoria->bloques[i].libre = true;
+        memoria->mapa_bits[i] = 0; // Libre en el mapa de bits
+    }
+    printf("Memoria inicializada con %d bloques de %d KB.\n", NUM_BLOQUES, TAMANO_BLOQUE);
+}
+
+//inicializaciond e memoria mejor ajuste
+
+int asignar_memoria_mejor_ajuste(memoria_t *memoria, int id_proceso, int tamano) {
+    int bloques_necesarios = (tamano + TAMANO_BLOQUE - 1) / TAMANO_BLOQUE;
+    int mejor_bloque = -1;
+    int tamano_minimo = TAMANO_MEMORIA + 1;
+
+    for (int i = 0; i < NUM_BLOQUES; i++) {
+        if (memoria->bloques[i].libre) {
+            int j = i, bloques_libres = 0;
+            while (j < NUM_BLOQUES && memoria->bloques[j].libre) {
+                bloques_libres++;
+                if (bloques_libres >= bloques_necesarios) break;
+                j++;
+            }
+            if (bloques_libres >= bloques_necesarios && bloques_libres < tamano_minimo) {
+                mejor_bloque = i;
+                tamano_minimo = bloques_libres;
+            }
+            i = j; // Saltar bloques ya revisados
+        }
+    }
+
+    if (mejor_bloque != -1) {
+        for (int i = mejor_bloque; i < mejor_bloque + bloques_necesarios; i++) {
+            memoria->bloques[i].id_proceso = id_proceso;
+            memoria->bloques[i].libre = false;
+            memoria->mapa_bits[i] = 1; // Marcar como ocupado en el mapa de bits
+        }
+        printf("Proceso %d asignado a bloques %d-%d (%d KB).\n", id_proceso, mejor_bloque,
+               mejor_bloque + bloques_necesarios - 1, tamano);
+        return mejor_bloque;
+    }
+
+    printf("No hay suficiente memoria para el proceso %d (%d KB).\n", id_proceso, tamano);
+    return -1;
+}
+
+
+//memoria mapa de bits
+
+int asignar_memoria_mapa_bits(memoria_t *memoria, int id_proceso, int tamano) {
+    int bloques_necesarios = (tamano + TAMANO_BLOQUE - 1) / TAMANO_BLOQUE;
+
+    for (int i = 0; i < NUM_BLOQUES; i++) {
+        if (memoria->mapa_bits[i] == 0) { // Bloque libre
+            int j = i, bloques_libres = 0;
+            while (j < NUM_BLOQUES && memoria->mapa_bits[j] == 0) {
+                bloques_libres++;
+                if (bloques_libres >= bloques_necesarios) break;
+                j++;
+            }
+            if (bloques_libres >= bloques_necesarios) {
+                for (int k = i; k < i + bloques_necesarios; k++) {
+                    memoria->bloques[k].id_proceso = id_proceso;
+                    memoria->bloques[k].libre = false;
+                    memoria->mapa_bits[k] = 1; // Marcar como ocupado
+                }
+                printf("Proceso %d asignado a bloques %d-%d (%d KB).\n", id_proceso, i,
+                       i + bloques_necesarios - 1, tamano);
+                return i;
+            }
+            i = j; // Saltar bloques ya revisados
+        }
+    }
+
+    printf("No hay suficiente memoria para el proceso %d (%d KB).\n", id_proceso, tamano);
+    return -1;
+}
+
+
+//Liberar memoria
+
+
+void liberar_memoria(memoria_t *memoria, int id_proceso) {
+    for (int i = 0; i < NUM_BLOQUES; i++) {
+        if (memoria->bloques[i].id_proceso == id_proceso) {
+            memoria->bloques[i].id_proceso = -1;
+            memoria->bloques[i].libre = true;
+            memoria->mapa_bits[i] = 0; // Marcar como libre en el mapa de bits
+        }
+    }
+    printf("Memoria liberada para el proceso %d.\n", id_proceso);
+}
+
+
+//simulamos crecimiento
+
+
+void simular_crecimiento(memoria_t *memoria) {
+    for (int i = 0; i < 2; i++) {
+        int id_proceso = rand() % 10 + 1; // Proceso aleatorio
+        int tamano_extra = (rand() % 3 + 1) * TAMANO_BLOQUE; // Tamaño extra aleatorio
+
+        printf("Proceso %d solicita crecer %d KB.\n", id_proceso, tamano_extra);
+        if (algoritmo_actual == 'M') {
+            asignar_memoria_mejor_ajuste(memoria, id_proceso, tamano_extra);
+        } else if (algoritmo_actual == 'B') {
+            asignar_memoria_mapa_bits(memoria, id_proceso, tamano_extra);
+        }
+    }
+}
+
+
+//cambiar algoritmo
+
+void cambiar_algoritmo() {
+    printf("\nSeleccione el algoritmo de asignación:\n");
+    printf("M - Mejor Ajuste\n");
+    printf("B - Mapa de Bits\n");
+    printf("Ingrese su elección: ");
+    char opcion;
+    scanf(" %c", &opcion);
+
+    if (opcion == 'M' || opcion == 'm') {
+        algoritmo_actual = 'M';
+        printf("Algoritmo cambiado a Mejor Ajuste.\n");
+    } else if (opcion == 'B' || opcion == 'b') {
+        algoritmo_actual = 'B';
+        printf("Algoritmo cambiado a Mapa de Bits.\n");
+    } else {
+        printf("Opción inválida. Manteniendo el algoritmo actual.\n");
+    }
+}
+
 
 // Prototipos de funciones
 void mano_inicializar(mano_t *mano, int capacidad);
@@ -2344,6 +2500,26 @@ void *jugador_thread(void *arg)
             printf("\n=== Fin de turno de %s ===\n", jugador->nombre);
         }
 
+
+        // Dentro del bucle principal del jugador_thread
+    if (!turno_activo) {
+    printf("\n=== Fin de turno de %s ===\n", jugador->nombre);
+
+    // Simular entrada/salida asignando memoria
+    int memoria_requerida = (rand() % 3 + 1) * TAMANO_BLOQUE; // Tamaño aleatorio entre 64 y 192 KB
+    printf("\nSimulando E/S para %s: requiere %d KB de memoria.\n", jugador->nombre, memoria_requerida);
+
+    if (algoritmo_actual == 'M') {
+        asignar_memoria_mejor_ajuste(&memoria, jugador->id, memoria_requerida);
+    } else if (algoritmo_actual == 'B') {
+        asignar_memoria_mapa_bits(&memoria, jugador->id, memoria_requerida);
+    }
+
+    // Liberar memoria después de simular la operación de E/S
+    printf("\nLiberando memoria asignada a %s tras completar E/S.\n", jugador->nombre);
+    liberar_memoria(&memoria, jugador->id);
+}
+
         // Verificar condiciones de victoria
         if (jugador->mano.cantidad == 0)
         {
@@ -2524,14 +2700,17 @@ void verificar_cola_de_esperas()
 {
     for (int i = 0; i < num_de_esperas; i++)
     {
-        pcbs[cola_de_esperas[i] - 1].tiempo_restante--;
-        if (pcbs[cola_de_esperas[i] - 1].tiempo_restante <= 0)
+        // Decrementar el tiempo de espera del jugador
+        pcbs[cola_de_esperas[i] - 1].tiempo_de_espera--;
+        if (pcbs[cola_de_esperas[i] - 1].tiempo_de_espera <= 0)
         {
             printf("\nJugador %d ha terminado su tiempo en E/S. Moviendo a la cola de listos.\n", cola_de_esperas[i]);
+            
+            // Mover a la cola de listos
             agregar_a_cola_listos(cola_de_esperas[i]);
-            pcbs[cola_de_esperas[i] - 1].estado = 1; // Listo
+            pcbs[cola_de_esperas[i] - 1].estado = LISTO;
 
-            // Eliminar jugador de la cola de de_esperas
+            // Eliminar jugador de la cola de E/S
             for (int j = i; j < num_de_esperas - 1; j++)
             {
                 cola_de_esperas[j] = cola_de_esperas[j + 1];
@@ -2803,7 +2982,7 @@ int main()
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_sec += 1; // Timeout de 1 segundo
-
+    
         // Verificar ganador
         if (pthread_mutex_timedlock(&mutex, &ts) == 0)
         {
@@ -2815,19 +2994,29 @@ int main()
             }
             pthread_mutex_unlock(&mutex);
         }
-
+    
         // Manejo de turnos
         int jugador_actual = siguiente_turno();
         if (jugador_actual != -1)
         {
             jugador_thread(&jugadores[jugador_actual - 1]);
-
+    
             // Control de rondas
             static int turnos_en_ronda = 0;
             if (++turnos_en_ronda >= NUM_JUGADORES)
             {
                 printf("\n=== Fin de ronda %d ===\n", ronda++);
                 turnos_en_ronda = 0;
+    
+                // Permitir al usuario cambiar el algoritmo de asignación de memoria
+                printf("\n¿Desea cambiar el algoritmo de asignación de memoria? (S/N): ");
+                char opcion;
+                scanf(" %c", &opcion);
+                if (opcion == 'S' || opcion == 's')
+                {
+                    cambiar_algoritmo();
+                }
+    
                 elegir_politica();
                 mostrar_estado_juego();
             }
@@ -2855,6 +3044,22 @@ int main()
     pthread_mutex_destroy(&mutex_mesa);
     pthread_mutex_destroy(&mutex_terminacion);
     pthread_cond_destroy(&cond_turno);
+
+
+    inicializar_memoria(&memoria);
+
+    // Asignar memoria inicial a algunos procesos
+    asignar_memoria_mejor_ajuste(&memoria, 1, 128);
+    asignar_memoria_mapa_bits(&memoria, 2, 192);
+
+    // Simular crecimiento aleatorio
+    simular_crecimiento(&memoria);
+
+    // Cambiar algoritmo manualmente
+    cambiar_algoritmo();
+
+    // Liberar memoria de un proceso
+    liberar_memoria(&memoria, 1);
 
     return 0;
 }
