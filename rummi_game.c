@@ -14,28 +14,33 @@
 #include <time.h>
 #include <errno.h>
 #include <sys/poll.h>
+#include <fcntl.h>
 
 // ----------------------------------------------------------------------
 // Macros
 // ----------------------------------------------------------------------
 #define NUM_JUGADORES 4          // Número fijo de jugadores
-#define MAX_FICHAS 108           // Total fichas en el mazo (standard para Rummy)
+#define MAX_CARTAS 108           // Total cartas en el mazo (standard para Rummy)
 #define QUANTUM 20               // Tiempo por turno en segundos
 #define PUNTOS_MINIMOS_APEADA 30 // Mínimo para primera apeada
 
-#define FICHAS_INICIALES 14 // Fichas al repartir (puede variar según reglas)
+#define CARTAS_INICIALES 14 // Cartas al repartir (puede variar según reglas)
 #define MAX_COLOR 15        // Longitud máxima para nombre de color
 #define MAX_NOMBRE 50       // Longitud máxima para nombre jugador
 
-#define MAX_FICHAS_GRUPO 4     // Máximo fichas en grupo (ej: 4 sietes)
-#define MAX_FICHAS_ESCALERA 13 // Máximo en escalera (A-2-...-K)
+#define MAX_CARTAS_GRUPO 4     // Máximo cartas en grupo (ej: 4 sietes)
+#define MAX_CARTAS_ESCALERA 13 // Máximo en escalera (A-2-...-K)
 #define MAX_GRUPOS 10          // Máximo grupos en mesa
 #define MAX_ESCALERAS 10       // Máximo escaleras en mesa
 #define VALOR_COMODIN 0        // Valor numérico para comodines
-#define MIN_FICHAS_GRUPO 3     // Mínimo fichas para un grupo
-#define MIN_FICHAS_ESCALERA 3  // Mínimo fichas para escalera
+#define MIN_CARTAS_GRUPO 3     // Mínimo cartas para un grupo
+#define MIN_CARTAS_ESCALERA 3  // Mínimo cartas para escalera
 
 #define TURNO_MAXIMO 30 // 30 segundos por turno
+
+#define TAMANO_MEMORIA 1024  // Tamaño total de memoria en bytes
+#define TAMANO_BLOQUE 32     // Tamaño de cada bloque de memoria en bytes
+#define TAMANO_MAPA_BITS (TAMANO_MEMORIA / TAMANO_BLOQUE / 8) + 1  // Tamaño del arreglo de bits
 
 // ----------------------------------------------------------------------
 // Estructuras y Tipos
@@ -43,27 +48,27 @@
 
 typedef struct
 {
-    int numero;            // Valor numérico de la ficha (1-13 para valores normales)
-    char color[MAX_COLOR]; // Color de la ficha (ej: "rojo", "azul", "comodín")
-} ficha_t;
+    int numero;            // Valor numérico de la carta (1-13 para valores normales)
+    char color[MAX_COLOR]; // Color de la carta (ej: "rojo", "azul", "comodín")
+} carta_t;
 
 typedef struct
 {
-    ficha_t *fichas; // Array dinámico de fichas
-    int cantidad;    // Fichas actuales en mano
+    carta_t *cartas; // Array dinámico de cartas
+    int cantidad;    // Cartas actuales en mano
     int capacidad;   // Capacidad máxima actual del array
 } mano_t;
 
 typedef struct
 {
-    ficha_t fichas[MAX_FICHAS_GRUPO]; // Array estático para grupo (ej: 4 fichas igual número)
-    int cantidad;                     // Fichas actuales en el grupo
+    carta_t cartas[MAX_CARTAS_GRUPO]; // Array estático para grupo (ej: 4 cartas igual número)
+    int cantidad;                     // Cartas actuales en el grupo
 } grupo_t;
 
 typedef struct
 {
-    ficha_t fichas[MAX_FICHAS_ESCALERA]; // Array estático para escalera (ej: 3+ fichas consecutivas mismo color)
-    int cantidad;                        // Fichas actuales en la escalera
+    carta_t cartas[MAX_CARTAS_ESCALERA]; // Array estático para escalera (ej: 3+ cartas consecutivas mismo color)
+    int cantidad;                        // Cartas actuales en la escalera
 } escalera_t;
 
 typedef struct
@@ -74,21 +79,39 @@ typedef struct
     int total_escaleras;   // Escaleras actuales
 } banco_de_apeadas_t;
 
-typedef struct
+typedef enum
 {
-    mano_t mano;             // Fichas en mano del jugador
-    char nombre[MAX_NOMBRE]; // Nombre del jugador
-    int id;                  // Identificador único
-    int tiempo_restante;     // Tiempo disponible (para turnos)
+    BLOQUEADO,
+    LISTO,
+    EJECUTANDO
+} estado_jugador;
+
+typedef struct {
+    int id;               // ID único (1-4)
+    char nombre[MAX_NOMBRE];      // Nombre del jugador
+    estado_jugador estado;        // Estado (BLOQUEADO/LISTO/EJECUTANDO)
+    int tiempo_restante;          // Tiempo restante en turno (para Round Robin)
+    int tiempo_bloqueado;         // Tiempo acumulado en E/S
+    int memoria_asignada;         // Para Parte II (gestión de memoria)
+    int puntos;                   // Puntos acumulados en partida
+    int puntos_mano_actual;       // Puntos en mano actual (para validar 30+)
+    int turnos_jugados;           // Turnos totales
+    int cartas_robadas;           // Cartas robadas de la banca
+    int cartas_embonadas;         // Cartas añadidas a apeadas existentes
+    int grupos_formados;          // Ternas/cuaternas creadas
     int puntos_suficientes;  // Flag si alcanzó puntos mínimos
+    int escaleras_formadas;       // Escaleras creadas  
+    bool carta_agregada;     // Nueva bandera: indica si ya agregó una carta en el turno
     bool en_juego;           // Estado activo/inactivo
-    bool ficha_agregada;     // Nueva bandera: indica si ya agregó una ficha en el turno
+    int tiempo_total_juego;       // Tiempo total jugado
+    int tiempo_en_turno;          // Tiempo acumulado en turnos activos
+    mano_t mano;                  // Cartas en mano (array dinámico)
 } jugador_t;
 
 typedef struct
 {
-    ficha_t fichas[MAX_FICHAS]; // Array estático con todas las fichas
-    int cantidad;               // Fichas actuales en el mazo
+    carta_t cartas[MAX_CARTAS]; // Array estático con todas las cartas
+    int cantidad;               // Cartas actuales en el mazo
 } mazo_t;
 
 typedef struct
@@ -99,43 +122,69 @@ typedef struct
     int total_escaleras;   // Escaleras actuales
 } apeada_t;
 
-// Estados posibles de un jugador
-typedef enum
-{
-    DE_ESPERA,
-    LISTO,
-    EJECUTANDO
-} estado_jugador;
-
 typedef struct
 {
-    int id_jugador;             // ID del jugador
-    char nombre[MAX_NOMBRE];    // Nombre abreviado
-    int fichas_en_mano;         // Fichas actuales
-    int puntos;                 // Puntos acumulados
-    int partidas_jugadas;       // Total partidas
-    int partidas_ganadas;       // Victorias
-    int partidas_perdidas;      // Derrotas
-    estado_jugador estado;      // Estado actual
-    int tiempo_total_juego;     // Tiempo jugado acumulado
-    int turnos_jugados;         // Turnos tomados
-    int fichas_robadas;         // Fichas robadas
-    int fichas_desfichadas;     // Fichas desfichadas
-    int grupos_formados;        // Grupos creados
-    int escaleras_formadas;     // Escaleras creadas
-    int victorias_con_escalera; // Victorias con escalera completa
-    int tiempo_restante;        // Tiempo en turno actual
-    int tiempo_de_espera;       // Tiempo bloqueo
-    int tiempo_espera_restante; // Tiempo restante en espera
+    int id_jugador;          // ID único del jugador
+    char nombre[MAX_NOMBRE]; // Nombre del jugador
+    estado_jugador estado;   // Estado actual (LISTO, EJECUTANDO, BLOQUEADO)
+    int cartas_en_mano;      // Número de cartas en mano
+    int puntos;              // Puntos acumulados
+    int tiempo_restante;     // Tiempo restante en el turno actual
+    int turnos_jugados;      // Número de turnos jugados
+    int cartas_robadas;      // Número de cartas robadas
+    int cartas_embonadas;            // Cartas añadidas a apeadas existentes
+    int grupos_formados;     // Número de grupos formados
+    int escaleras_formadas;  // Número de escaleras formadas
+    int tiempo_total_juego;  // Tiempo total desde que el jugador entró al juego hasta el momento actual
+    int tiempo_bloqueado;    // Tiempo total en estado bloqueado
+    int tiempo_en_turno; // Tiempo total que el jugador ha pasado en sus turnos
+    int memoria_asignada;  // Memoria asignada (para Parte II)
 } pcb_t;
 
-// Nuevo struct para pasar datos a los hilos
+typedef struct {
+    pcb_t pcbs[NUM_JUGADORES];  // Array de PCBs (uno por jugador)
+    int jugadores_activos;       // Cuántos jugadores están en juego
+    pthread_mutex_t mutex;       // Para acceso thread-safe (evitar race conditions)
+} tabla_procesos_t;
+    
 typedef struct
 {
     volatile bool *terminar_flag;
     pthread_mutex_t *mutex;
     pthread_cond_t *cond;
 } hilo_control_t;
+
+//ESTRUCTURAS PARA EL MAPA DE BITS
+
+typedef struct {
+    unsigned char mapa_bits[TAMANO_MAPA_BITS];  // Arreglo para el mapa de bits
+    int bloques_totales;                   // Número total de bloques
+    int bloques_libres;                    // Bloques libres
+} ManejadorMemoriaMapaBits;
+
+void inicializar_mapa_bits(ManejadorMemoriaMapaBits *manejador) {
+    manejador->bloques_totales = TAMANO_MEMORIA / TAMANO_BLOQUE;
+    manejador->bloques_libres = manejador->bloques_totales;
+    
+    // Inicializar todos los bits a 0 (libres)
+    for (int i = 0; i < TAMANO_MAPA_BITS; i++) {
+        manejador->mapa_bits[i] = 0;
+    }
+}
+
+//ESTRUCTURAS PARA LISTAS LIGADAS
+
+typedef struct bloque_memoria {
+    int inicio;
+    int tamano;
+    int disponible; // 1 si está libre, 0 si está ocupado
+    struct bloque_memoria *siguiente;
+} BloqueMemoria;
+
+typedef struct {
+    BloqueMemoria *lista_bloques;
+    int memoria_total;
+} GestionMemoria;
 
 // ----------------------------------------------------------------------
 // Variables Globales
@@ -157,14 +206,14 @@ pthread_mutex_t mutex_cola_listos = PTHREAD_MUTEX_INITIALIZER; // Para colas de 
 char modo = 'R';                                      // Modo de scheduling: 'F' (FCFS) o 'R' (Round Robin)
 int cola_listos[NUM_JUGADORES];                       // Cola de jugadores listos para jugar
 int frente = 0, final = 0;                            // Índices para la cola circular
-int cola_de_esperas[NUM_JUGADORES];                   // Cola de jugadores de_esperas
-int num_de_esperas = 0;                               // Contador de jugadores en espera
+int cola_bloqueados[NUM_JUGADORES];                   // Cola de jugadores bloqueados
+int num_bloqueados = 0;                               // Contador de jugadores bloqueados
 pthread_t hilo_juego;                                 // Hilo del juego
 pthread_cond_t cond_turno = PTHREAD_COND_INITIALIZER; // Variable de condición para el juego
 int proceso_en_ejecucion = -1;                        // ID del proceso en ejecución
 int tiempo_restante_quantum = 0;                      // Tiempo restante del proceso en ejecución
 
-mazo_t mazo;        // Mazo de fichas
+mazo_t mazo;        // Mazo de cartas
 int num_listos = 0; // Número de jugadores en la cola de listos
 
 // ----------------------------------------------------------------------
@@ -180,13 +229,10 @@ void reiniciar_cola_listos();
 void *jugador_thread(void *arg);
 bool puede_hacer_apeada(jugador_t *jugador);
 int calcular_puntos_apeada(const apeada_t *apeada);
-void verificar_cola_de_esperas();
-bool es_grupo_valido(const ficha_t fichas[], int cantidad);
-bool es_escalera_valida(const ficha_t fichas[], int cantidad);
-void mostrar_robo_ficha(const ficha_t *ficha, bool es_automatico); // Nueva función
-
-bool cola_vacia(void);
-void mover_a_espera(int id_jugador);
+void verificar_cola_bloqueados();
+bool es_grupo_valido(const carta_t cartas[], int cantidad);
+bool es_escalera_valida(const carta_t cartas[], int cantidad);
+void mostrar_robo_carta(const carta_t *carta, bool es_automatico); // Nueva función
 
 void mano_inicializar(mano_t *mano, int capacidad)
 {
@@ -196,8 +242,8 @@ void mano_inicializar(mano_t *mano, int capacidad)
         exit(EXIT_FAILURE);
     }
 
-    mano->fichas = (ficha_t *)malloc(sizeof(ficha_t) * capacidad);
-    if (mano->fichas == NULL)
+    mano->cartas = (carta_t *)malloc(sizeof(carta_t) * capacidad);
+    if (mano->cartas == NULL)
     {
         fprintf(stderr, "Error al asignar memoria para la mano\n");
         exit(EXIT_FAILURE);
@@ -207,39 +253,56 @@ void mano_inicializar(mano_t *mano, int capacidad)
     mano->capacidad = capacidad;
 }
 
-void inicializar_jugadores(mazo_t *mazo)
-{
-    if (mazo == NULL)
-    {
+void inicializar_jugadores(mazo_t *mazo) {
+    if (mazo == NULL) {
         fprintf(stderr, "Error: Puntero a mazo inválido\n");
         exit(EXIT_FAILURE);
     }
 
-    // Verificar suficientes fichas para todos los jugadores
-    if (mazo->cantidad < FICHAS_INICIALES * NUM_JUGADORES)
-    {
-        fprintf(stderr, "Error: No hay suficientes fichas en el mazo (%d necesarias, %d disponibles)\n",
-                FICHAS_INICIALES * NUM_JUGADORES, mazo->cantidad);
+    // Verificar suficientes cartas para repartir
+    if (mazo->cantidad < CARTAS_INICIALES * NUM_JUGADORES) {
+        fprintf(stderr, "Error: No hay suficientes cartas en el mazo (%d necesarias, %d disponibles)\n",
+                CARTAS_INICIALES * NUM_JUGADORES, mazo->cantidad);
         exit(EXIT_FAILURE);
     }
 
-    for (int i = 0; i < NUM_JUGADORES; i++)
-    {
-        // Inicializar datos básicos del jugador
-        jugadores[i].id = i + 1; // IDs comienzan en 1
+    for (int i = 0; i < NUM_JUGADORES; i++) {
+        // Inicialización de propiedades básicas
+        jugadores[i].id = i + 1;  // IDs comienzan en 1
         snprintf(jugadores[i].nombre, MAX_NOMBRE, "Jugador %d", i + 1);
+        jugadores[i].estado = LISTO;
         jugadores[i].en_juego = true;
+        jugadores[i].carta_agregada = false;
         jugadores[i].puntos_suficientes = false;
-        jugadores[i].ficha_agregada = false;
-        jugadores[i].tiempo_restante = QUANTUM * 2; // Tiempo inicial por jugador
 
-        // Inicializar mano
-        mano_inicializar(&jugadores[i].mano, FICHAS_INICIALES * 2); // Capacidad inicial doble
+        // Inicialización de tiempos
+        jugadores[i].tiempo_restante = TURNO_MAXIMO;
+        jugadores[i].tiempo_bloqueado = 0;
+        jugadores[i].tiempo_total_juego = 0;
+        jugadores[i].tiempo_en_turno = 0;
 
-        // Repartir fichas (tomando del final del mazo)
-        for (int j = 0; j < FICHAS_INICIALES; j++)
-        {
-            jugadores[i].mano.fichas[j] = mazo->fichas[mazo->cantidad - 1];
+        // Inicialización de contadores de juego
+        jugadores[i].puntos = 0;
+        jugadores[i].puntos_mano_actual = 0;
+        jugadores[i].turnos_jugados = 0;
+        jugadores[i].cartas_robadas = 0;
+        jugadores[i].cartas_embonadas = 0;
+        jugadores[i].grupos_formados = 0;
+        jugadores[i].escaleras_formadas = 0;
+        jugadores[i].memoria_asignada = 0;  // Para Parte II
+
+        // Inicialización de la mano de cartas
+        jugadores[i].mano.cartas = malloc(CARTAS_INICIALES * sizeof(carta_t));
+        if (jugadores[i].mano.cartas == NULL) {
+            perror("Error al asignar memoria para la mano");
+            exit(EXIT_FAILURE);
+        }
+        jugadores[i].mano.cantidad = 0;
+        jugadores[i].mano.capacidad = CARTAS_INICIALES;
+
+        // Repartir cartas iniciales (tomando del final del mazo)
+        for (int j = 0; j < CARTAS_INICIALES; j++) {
+            jugadores[i].mano.cartas[j] = mazo->cartas[mazo->cantidad - 1];
             mazo->cantidad--;
             jugadores[i].mano.cantidad++;
         }
@@ -276,13 +339,23 @@ void banco_inicializar(banco_de_apeadas_t *banco)
     for (int i = 0; i < MAX_GRUPOS; i++)
     {
         banco->grupos[i].cantidad = 0;
-        memset(banco->grupos[i].fichas, 0, sizeof(ficha_t) * MAX_FICHAS_GRUPO);
+        memset(banco->grupos[i].cartas, 0, sizeof(carta_t) * MAX_CARTAS_GRUPO);
     }
 
     for (int i = 0; i < MAX_ESCALERAS; i++)
     {
         banco->escaleras[i].cantidad = 0;
-        memset(banco->escaleras[i].fichas, 0, sizeof(ficha_t) * MAX_FICHAS_ESCALERA);
+        memset(banco->escaleras[i].cartas, 0, sizeof(carta_t) * MAX_CARTAS_ESCALERA);
+    }
+}
+
+void tabla_procesos_iniciar(tabla_procesos_t *tabla) {
+    tabla->jugadores_activos = NUM_JUGADORES;
+    pthread_mutex_init(&tabla->mutex, NULL);
+    for (int i = 0; i < NUM_JUGADORES; i++) {
+        tabla->pcbs[i].id_jugador = i + 1;
+        tabla->pcbs[i].estado = LISTO;  // Estado inicial
+        tabla->pcbs[i].tiempo_restante = TURNO_MAXIMO;
     }
 }
 
@@ -316,13 +389,85 @@ void apeada_inicializar(apeada_t *apeada)
     for (int i = 0; i < MAX_GRUPOS; i++)
     {
         apeada->grupos[i].cantidad = 0;
-        memset(apeada->grupos[i].fichas, 0, sizeof(ficha_t) * MAX_FICHAS_GRUPO);
+        memset(apeada->grupos[i].cartas, 0, sizeof(carta_t) * MAX_CARTAS_GRUPO);
     }
 
     for (int i = 0; i < MAX_ESCALERAS; i++)
     {
         apeada->escaleras[i].cantidad = 0;
-        memset(apeada->escaleras[i].fichas, 0, sizeof(ficha_t) * MAX_FICHAS_ESCALERA);
+        memset(apeada->escaleras[i].cartas, 0, sizeof(carta_t) * MAX_CARTAS_ESCALERA);
+    }
+}
+
+void inicializar_mazo(mazo_t *mazo)
+{
+    const char *colores[] = {"rojo", "negro", "azul", "amarillo"};
+    int index = 0;
+
+    // Generar las 104 cartas normales (2 juegos de 1-13 en 4 colores)
+    for (int k = 0; k < 2; k++)
+    {
+        for (int c = 0; c < 4; c++)
+        {
+            for (int n = 1; n <= 13; n++)
+            {
+                mazo->cartas[index].numero = n;
+                strcpy(mazo->cartas[index].color, colores[c]);
+                index++;
+            }
+        }
+    }
+
+    // Agregar los 4 comodines
+    for (int j = 0; j < 4; j++)
+    {
+        mazo->cartas[index].numero = 0;
+        strcpy(mazo->cartas[index].color, "comodin");
+        index++;
+    }
+
+    mazo->cantidad = index;
+
+    // Validar que el mazo tenga exactamente 108 cartas
+    if (mazo->cantidad != MAX_CARTAS)
+    {
+        fprintf(stderr, "Error: El mazo no tiene 108 cartas. Tiene %d cartas.\n", mazo->cantidad);
+        exit(EXIT_FAILURE);
+    }
+}
+
+// Función para inicializar PCBs basada en la estructura actual
+void inicializar_pcbs() {
+    for (int i = 0; i < NUM_JUGADORES; i++) {
+        // Identificación básica
+        pcbs[i].id_jugador = i + 1;  // IDs comienzan en 1
+        snprintf(pcbs[i].nombre, sizeof(pcbs[i].nombre), "Jugador %d", i + 1);
+
+        // Estado del proceso/jugador
+        pcbs[i].estado = LISTO;       // Estado inicial
+        pcbs[i].tiempo_bloqueado = 0; // Tiempo acumulado bloqueado
+        pcbs[i].memoria_asignada = 0; // Inicialmente sin memoria asignada
+
+        // Estadísticas del juego
+        pcbs[i].cartas_en_mano = CARTAS_INICIALES;
+        pcbs[i].puntos = 0;
+        
+        // Tiempos y contadores
+        pcbs[i].tiempo_restante = TURNO_MAXIMO; // Usando la constante definida
+        pcbs[i].turnos_jugados = 0;
+        pcbs[i].tiempo_total_juego = 0;
+        pcbs[i].tiempo_en_turno = 0;
+
+        // Acciones del juego
+        pcbs[i].cartas_robadas = 0;
+        pcbs[i].cartas_embonadas = 0;  // Cambiado de cartas_descartadas
+        pcbs[i].grupos_formados = 0;
+        pcbs[i].escaleras_formadas = 0;
+
+        // Agregar a la cola de listos inicial (si esta función existe)
+        if (agregar_a_cola_listos) {
+            agregar_a_cola_listos(pcbs[i].id_jugador);
+        }
     }
 }
 
@@ -330,8 +475,8 @@ void mano_liberar(mano_t *mano)
 {
     if (mano != NULL)
     {
-        free(mano->fichas);
-        mano->fichas = NULL;
+        free(mano->cartas);
+        mano->cartas = NULL;
         mano->cantidad = 0;
         mano->capacidad = 0;
     }
@@ -341,8 +486,8 @@ void liberar_jugadores()
 {
     for (int i = 0; i < NUM_JUGADORES; i++)
     {
-        free(jugadores[i].mano.fichas); // Liberar memoria dinámica de las fichas
-        jugadores[i].mano.fichas = NULL;
+        free(jugadores[i].mano.cartas); // Liberar memoria dinámica de las cartas
+        jugadores[i].mano.cartas = NULL;
         jugadores[i].mano.cantidad = 0;
         jugadores[i].mano.capacidad = 0;
     }
@@ -395,7 +540,7 @@ void apeada_liberar(apeada_t *apeada)
 // ----------------------------------------------------------------------
 
 // Calcula puntos de un grupo
-int calcular_puntos_grupo(const ficha_t grupo[], int cantidad)
+int calcular_puntos_grupo(const carta_t grupo[], int cantidad)
 {
     int valor_base = -1;
     for (int i = 0; i < cantidad; i++)
@@ -412,7 +557,7 @@ int calcular_puntos_grupo(const ficha_t grupo[], int cantidad)
 }
 
 // Calcula puntos de una escalera
-int calcular_puntos_escalera(const ficha_t escalera[], int cantidad)
+int calcular_puntos_escalera(const carta_t escalera[], int cantidad)
 {
     int puntos = 0;
     int max_val = 0;
@@ -445,7 +590,7 @@ int calcular_puntos_escalera(const ficha_t escalera[], int cantidad)
 // hacer_apeada
 bool puede_hacer_apeada(jugador_t *jugador)
 {
-    // Verificar que el jugador tenga al menos 3 fichas
+    // Verificar que el jugador tenga al menos 3 cartas
     if (jugador->mano.cantidad < 3)
     {
         return false; // No puede hacer apeada
@@ -458,7 +603,7 @@ bool puede_hacer_apeada(jugador_t *jugador)
         {
             for (int k = j + 1; k < jugador->mano.cantidad; k++)
             {
-                ficha_t grupo[3] = {jugador->mano.fichas[i], jugador->mano.fichas[j], jugador->mano.fichas[k]};
+                carta_t grupo[3] = {jugador->mano.cartas[i], jugador->mano.cartas[j], jugador->mano.cartas[k]};
                 if (es_grupo_valido(grupo, 3))
                 {
                     return true; // Se encontró un grupo válido
@@ -474,7 +619,7 @@ bool puede_hacer_apeada(jugador_t *jugador)
         {
             for (int k = j + 1; k < jugador->mano.cantidad; k++)
             {
-                ficha_t escalera[3] = {jugador->mano.fichas[i], jugador->mano.fichas[j], jugador->mano.fichas[k]};
+                carta_t escalera[3] = {jugador->mano.cartas[i], jugador->mano.cartas[j], jugador->mano.cartas[k]};
                 if (es_escalera_valida(escalera, 3))
                 {
                     return true; // Se encontró una escalera válida
@@ -494,12 +639,12 @@ int calcular_puntos_banco(const banco_de_apeadas_t *banco)
 
     for (int i = 0; i < banco->total_grupos; i++)
     {
-        puntos += calcular_puntos_grupo(banco->grupos[i].fichas, banco->grupos[i].cantidad);
+        puntos += calcular_puntos_grupo(banco->grupos[i].cartas, banco->grupos[i].cantidad);
     }
 
     for (int i = 0; i < banco->total_escaleras; i++)
     {
-        puntos += calcular_puntos_escalera(banco->escaleras[i].fichas, banco->escaleras[i].cantidad);
+        puntos += calcular_puntos_escalera(banco->escaleras[i].cartas, banco->escaleras[i].cantidad);
     }
 
     return puntos;
@@ -520,13 +665,13 @@ int calcular_puntos_apeada(const apeada_t *apeada)
     // Sumar puntos de todos los grupos
     for (int i = 0; i < apeada->total_grupos; i++)
     {
-        puntos_totales += calcular_puntos_grupo(apeada->grupos[i].fichas, apeada->grupos[i].cantidad);
+        puntos_totales += calcular_puntos_grupo(apeada->grupos[i].cartas, apeada->grupos[i].cantidad);
     }
 
     // Sumar puntos de todas las escaleras
     for (int i = 0; i < apeada->total_escaleras; i++)
     {
-        puntos_totales += calcular_puntos_escalera(apeada->escaleras[i].fichas, apeada->escaleras[i].cantidad);
+        puntos_totales += calcular_puntos_escalera(apeada->escaleras[i].cartas, apeada->escaleras[i].cantidad);
     }
 
     return puntos_totales;
@@ -536,74 +681,74 @@ int calcular_puntos_apeada(const apeada_t *apeada)
 // Funciones de logica de apeada
 // ----------------------------------------------------------------------
 
-// Verifica si un conjunto de fichas forma un grupo válido
-bool es_grupo_valido(const ficha_t fichas[], int cantidad)
+// Verifica si un conjunto de cartas forma un grupo válido
+bool es_grupo_valido(const carta_t cartas[], int cantidad)
 {
     // Verificar límites de cantidad
-    if (cantidad < 3 || cantidad > MAX_FICHAS_GRUPO)
+    if (cantidad < 3 || cantidad > MAX_CARTAS_GRUPO)
     {
         return false;
     }
 
     int numero_base = -1;
     int comodines = 0;
-    char colores_usados[MAX_FICHAS_GRUPO][MAX_COLOR] = {0};
+    char colores_usados[MAX_CARTAS_GRUPO][MAX_COLOR] = {0};
     int colores_count = 0;
 
     for (int i = 0; i < cantidad; i++)
     {
-        if (fichas[i].numero == VALOR_COMODIN)
+        if (cartas[i].numero == VALOR_COMODIN)
         { // Usando VALOR_COMODIN
             comodines++;
         }
         else
         {
-            // Verificar que no haya fichas duplicadas (mismo número y color)
+            // Verificar que no haya cartas duplicadas (mismo número y color)
             for (int j = 0; j < colores_count; j++)
             {
-                if (strcmp(fichas[i].color, colores_usados[j]) == 0)
+                if (strcmp(cartas[i].color, colores_usados[j]) == 0)
                 {
                     return false; // Color repetido en el grupo
                 }
             }
 
             // Guardar color usado
-            strncpy(colores_usados[colores_count++], fichas[i].color, MAX_COLOR - 1);
+            strncpy(colores_usados[colores_count++], cartas[i].color, MAX_COLOR - 1);
 
             // Establecer o verificar número base
             if (numero_base == -1)
             {
-                numero_base = fichas[i].numero;
+                numero_base = cartas[i].numero;
             }
-            else if (fichas[i].numero != numero_base)
+            else if (cartas[i].numero != numero_base)
             {
                 return false; // Números diferentes
             }
         }
     }
 
-    // Debe haber al menos una ficha no comodín
+    // Debe haber al menos una carta no comodín
     return (numero_base != -1);
 }
 
-// Verifica si un conjunto de fichas forma una escalera válida
-bool es_escalera_valida(const ficha_t fichas[], int cantidad)
+// Verifica si un conjunto de cartas forma una escalera válida
+bool es_escalera_valida(const carta_t cartas[], int cantidad)
 {
     // Verificar límites de cantidad
-    if (cantidad < 3 || cantidad > MAX_FICHAS_ESCALERA)
+    if (cantidad < 3 || cantidad > MAX_CARTAS_ESCALERA)
     {
         return false;
     }
 
-    int numeros[MAX_FICHAS_ESCALERA] = {0};
+    int numeros[MAX_CARTAS_ESCALERA] = {0};
     char color_base[MAX_COLOR] = "";
     int idx = 0;
     int comodines = 0;
 
-    // Procesar fichas y verificar color consistente
+    // Procesar cartas y verificar color consistente
     for (int i = 0; i < cantidad; i++)
     {
-        if (fichas[i].numero == VALOR_COMODIN)
+        if (cartas[i].numero == VALOR_COMODIN)
         {
             comodines++;
         }
@@ -612,9 +757,9 @@ bool es_escalera_valida(const ficha_t fichas[], int cantidad)
             // Verificar color consistente
             if (strlen(color_base) == 0)
             {
-                strncpy(color_base, fichas[i].color, MAX_COLOR - 1);
+                strncpy(color_base, cartas[i].color, MAX_COLOR - 1);
             }
-            else if (strcmp(color_base, fichas[i].color) != 0)
+            else if (strcmp(color_base, cartas[i].color) != 0)
             {
                 return false; // Diferente color
             }
@@ -622,13 +767,13 @@ bool es_escalera_valida(const ficha_t fichas[], int cantidad)
             // Verificar que no haya números duplicados
             for (int j = 0; j < idx; j++)
             {
-                if (numeros[j] == fichas[i].numero)
+                if (numeros[j] == cartas[i].numero)
                 {
                     return false; // Número duplicado
                 }
             }
 
-            numeros[idx++] = fichas[i].numero;
+            numeros[idx++] = cartas[i].numero;
         }
     }
 
@@ -677,7 +822,7 @@ bool es_escalera_valida(const ficha_t fichas[], int cantidad)
 
         for (int i = 0; i < cantidad; i++)
         {
-            if (fichas[i].numero == VALOR_COMODIN)
+            if (cartas[i].numero == VALOR_COMODIN)
             {
                 if (i > 0 && i < cantidad - 1)
                 {
@@ -701,20 +846,20 @@ bool es_escalera_valida(const ficha_t fichas[], int cantidad)
     return true;
 }
 
-// Remueve una ficha de la mano en la posición especificada
-void remover_ficha(mano_t *mano, int pos)
+// Remueve una carta de la mano en la posición especificada
+void remover_carta(mano_t *mano, int pos)
 {
     if (pos >= 0 && pos < mano->cantidad)
     { // Verifica que la posición sea válida
         for (int i = pos; i < mano->cantidad - 1; i++)
         {
-            mano->fichas[i] = mano->fichas[i + 1]; // Desplaza las fichas hacia la izquierda
+            mano->cartas[i] = mano->cartas[i + 1]; // Desplaza las cartas hacia la izquierda
         }
-        mano->cantidad--; // Reduce la cantidad de fichas en la mano
+        mano->cantidad--; // Reduce la cantidad de cartas en la mano
     }
 }
 
-void remover_fichas(mano_t *mano, int indices[], int cantidad)
+void remover_cartas(mano_t *mano, int indices[], int cantidad)
 {
     // Ordenar indices de mayor a menor para evitar problemas
     for (int i = 0; i < cantidad - 1; i++)
@@ -732,7 +877,7 @@ void remover_fichas(mano_t *mano, int indices[], int cantidad)
     // Eliminar en orden descendente
     for (int i = 0; i < cantidad; i++)
     {
-        remover_ficha(mano, indices[i]);
+        remover_carta(mano, indices[i]);
     }
 }
 
@@ -740,7 +885,7 @@ void remover_fichas(mano_t *mano, int indices[], int cantidad)
 bool buscar_mejor_grupo(mano_t *mano, apeada_t *apeada, int *puntos)
 {
     int mejor_puntos = 0;
-    int mejores_indices[MAX_FICHAS_GRUPO] = {-1};
+    int mejores_indices[MAX_CARTAS_GRUPO] = {-1};
     int mejor_cantidad = 0;
 
     for (int i = 0; i < mano->cantidad - 2; i++)
@@ -749,18 +894,18 @@ bool buscar_mejor_grupo(mano_t *mano, apeada_t *apeada, int *puntos)
         {
             for (int k = j + 1; k < mano->cantidad; k++)
             {
-                ficha_t grupo[3] = {mano->fichas[i], mano->fichas[j], mano->fichas[k]};
+                carta_t grupo[3] = {mano->cartas[i], mano->cartas[j], mano->cartas[k]};
 
                 if (es_grupo_valido(grupo, 3))
                 {
                     int indices[4] = {i, j, k, -1};
                     int cantidad = 3;
 
-                    // Verificar si podemos añadir una cuarta ficha
+                    // Verificar si podemos añadir una cuarta carta
                     for (int l = k + 1; l < mano->cantidad; l++)
                     {
-                        ficha_t grupo4[4] = {mano->fichas[i], mano->fichas[j],
-                                             mano->fichas[k], mano->fichas[l]};
+                        carta_t grupo4[4] = {mano->cartas[i], mano->cartas[j],
+                                             mano->cartas[k], mano->cartas[l]};
                         if (es_grupo_valido(grupo4, 4))
                         {
                             indices[3] = l;
@@ -795,11 +940,11 @@ bool buscar_mejor_grupo(mano_t *mano, apeada_t *apeada, int *puntos)
         nuevo_grupo->cantidad = mejor_cantidad;
         for (int i = 0; i < mejor_cantidad; i++)
         {
-            nuevo_grupo->fichas[i] = mano->fichas[mejores_indices[i]];
+            nuevo_grupo->cartas[i] = mano->cartas[mejores_indices[i]];
         }
 
         *puntos += mejor_puntos;
-        remover_fichas(mano, mejores_indices, mejor_cantidad);
+        remover_cartas(mano, mejores_indices, mejor_cantidad);
         return true;
     }
 
@@ -810,7 +955,7 @@ bool buscar_mejor_grupo(mano_t *mano, apeada_t *apeada, int *puntos)
 bool buscar_mejor_escalera(mano_t *mano, apeada_t *apeada, int *puntos)
 {
     int mejor_puntos = 0;
-    int mejores_indices[MAX_FICHAS_ESCALERA] = {-1};
+    int mejores_indices[MAX_CARTAS_ESCALERA] = {-1};
     int mejor_cantidad = 0;
 
     for (int i = 0; i < mano->cantidad - 2; i++)
@@ -819,11 +964,11 @@ bool buscar_mejor_escalera(mano_t *mano, apeada_t *apeada, int *puntos)
         {
             for (int k = j + 1; k < mano->cantidad; k++)
             {
-                ficha_t escalera[3] = {mano->fichas[i], mano->fichas[j], mano->fichas[k]};
+                carta_t escalera[3] = {mano->cartas[i], mano->cartas[j], mano->cartas[k]};
 
                 if (es_escalera_valida(escalera, 3))
                 {
-                    int indices[MAX_FICHAS_ESCALERA] = {i, j, k};
+                    int indices[MAX_CARTAS_ESCALERA] = {i, j, k};
                     int cantidad = 3;
 
                     // Intentar extender la escalera
@@ -841,12 +986,12 @@ bool buscar_mejor_escalera(mano_t *mano, apeada_t *apeada, int *puntos)
 
                         if (!ya_en_escalera)
                         {
-                            ficha_t escalera_ext[MAX_FICHAS_ESCALERA];
+                            carta_t escalera_ext[MAX_CARTAS_ESCALERA];
                             for (int m = 0; m < cantidad; m++)
                             {
-                                escalera_ext[m] = mano->fichas[indices[m]];
+                                escalera_ext[m] = mano->cartas[indices[m]];
                             }
-                            escalera_ext[cantidad] = mano->fichas[l];
+                            escalera_ext[cantidad] = mano->cartas[l];
 
                             if (es_escalera_valida(escalera_ext, cantidad + 1))
                             {
@@ -882,11 +1027,11 @@ bool buscar_mejor_escalera(mano_t *mano, apeada_t *apeada, int *puntos)
         nueva_escalera->cantidad = mejor_cantidad;
         for (int i = 0; i < mejor_cantidad; i++)
         {
-            nueva_escalera->fichas[i] = mano->fichas[mejores_indices[i]];
+            nueva_escalera->cartas[i] = mano->cartas[mejores_indices[i]];
         }
 
         *puntos += mejor_puntos;
-        remover_fichas(mano, mejores_indices, mejor_cantidad);
+        remover_cartas(mano, mejores_indices, mejor_cantidad);
         return true;
     }
 
@@ -910,16 +1055,16 @@ void buscar_combinaciones(mano_t *mano, apeada_t *apeada, int *puntos, bool prio
 // Busca combinación mixta óptima y la añade al banco
 void buscar_combinacion_mixta(mano_t *mano, apeada_t *apeada, int *puntos)
 {
-    // Primero buscamos grupos que usen números con múltiples fichas
+    // Primero buscamos grupos que usen números con múltiples cartas
     for (int i = 0; i < mano->cantidad - 2; i++)
     {
-        if (mano->fichas[i].numero == 0)
+        if (mano->cartas[i].numero == 0)
             continue;
 
         int contador = 1;
         for (int j = i + 1; j < mano->cantidad; j++)
         {
-            if (mano->fichas[j].numero == mano->fichas[i].numero)
+            if (mano->cartas[j].numero == mano->cartas[i].numero)
             {
                 contador++;
             }
@@ -934,12 +1079,12 @@ void buscar_combinacion_mixta(mano_t *mano, apeada_t *apeada, int *puntos)
     // Luego buscamos escaleras con colores que tengan secuencias
     for (int i = 0; i < mano->cantidad - 2; i++)
     {
-        if (mano->fichas[i].numero == 0)
+        if (mano->cartas[i].numero == 0)
             continue;
 
         for (int j = i + 1; j < mano->cantidad - 1; j++)
         {
-            if (strcmp(mano->fichas[i].color, mano->fichas[j].color) == 0)
+            if (strcmp(mano->cartas[i].color, mano->cartas[j].color) == 0)
             {
                 buscar_mejor_escalera(mano, apeada, puntos);
             }
@@ -980,14 +1125,14 @@ void mostrar_apeada(const apeada_t *apeada)
             printf("Grupo %d: ", i + 1);
             for (int j = 0; j < apeada->grupos[i].cantidad; j++)
             {
-                if (apeada->grupos[i].fichas[j].numero == 0)
+                if (apeada->grupos[i].cartas[j].numero == 0)
                 {
                     printf("[Comodín] ");
                 }
                 else
                 {
-                    printf("[%d %s] ", apeada->grupos[i].fichas[j].numero,
-                           apeada->grupos[i].fichas[j].color);
+                    printf("[%d %s] ", apeada->grupos[i].cartas[j].numero,
+                           apeada->grupos[i].cartas[j].color);
                 }
             }
             printf("\n");
@@ -1003,14 +1148,14 @@ void mostrar_apeada(const apeada_t *apeada)
             printf("Escalera %d: ", i + 1);
             for (int j = 0; j < apeada->escaleras[i].cantidad; j++)
             {
-                if (apeada->escaleras[i].fichas[j].numero == 0)
+                if (apeada->escaleras[i].cartas[j].numero == 0)
                 {
                     printf("[Comodín] ");
                 }
                 else
                 {
-                    printf("[%d %s] ", apeada->escaleras[i].fichas[j].numero,
-                           apeada->escaleras[i].fichas[j].color);
+                    printf("[%d %s] ", apeada->escaleras[i].cartas[j].numero,
+                           apeada->escaleras[i].cartas[j].color);
                 }
             }
             printf("\n");
@@ -1028,12 +1173,12 @@ void mostrar_apeada(const apeada_t *apeada)
     printf("────────────────────────────\n");
 }
 
-//Funcion para encontrar el índice de una ficha en la mano
-static int encontrar_indice_ficha(const mano_t *mano, const ficha_t *ficha)
+//Funcion para encontrar el índice de una carta en la mano
+static int encontrar_indice_carta(const mano_t *mano, const carta_t *carta)
 {
     for (int i = 0; i < mano->cantidad; i++)
     {
-        if (memcmp(&mano->fichas[i], ficha, sizeof(ficha_t)) == 0)
+        if (memcmp(&mano->cartas[i], carta, sizeof(carta_t)) == 0)
         {
             return i;
         }
@@ -1053,7 +1198,7 @@ apeada_t calcular_mejor_apeada_aux(const jugador_t *jugador)
         // Crear copia temporal de la mano para pruebas
         mano_t mano_temp;
         mano_inicializar(&mano_temp, jugador->mano.capacidad);
-        memcpy(mano_temp.fichas, jugador->mano.fichas, jugador->mano.cantidad * sizeof(ficha_t));
+        memcpy(mano_temp.cartas, jugador->mano.cartas, jugador->mano.cantidad * sizeof(carta_t));
         mano_temp.cantidad = jugador->mano.cantidad;
 
         apeada_t apeada_temp;
@@ -1113,19 +1258,19 @@ apeada_t crear_mejor_apeada(jugador_t *jugador)
         // Crear copia de la mano para modificar
         mano_t mano_temp;
         mano_inicializar(&mano_temp, jugador->mano.capacidad);
-        memcpy(mano_temp.fichas, jugador->mano.fichas, jugador->mano.cantidad * sizeof(ficha_t));
+        memcpy(mano_temp.cartas, jugador->mano.cartas, jugador->mano.cantidad * sizeof(carta_t));
         mano_temp.cantidad = jugador->mano.cantidad;
 
-        // Eliminar fichas usadas en la apeada
+        // Eliminar cartas usadas en la apeada
         for (int g = 0; g < apeada_calculada.total_grupos; g++)
         {
             for (int c = 0; c < apeada_calculada.grupos[g].cantidad; c++)
             {
                 int idx = -1;
-                // Buscar la ficha en la mano (comparando todos los campos)
+                // Buscar la carta en la mano (comparando todos los campos)
                 for (int i = 0; i < mano_temp.cantidad; i++)
                 {
-                    if (memcmp(&mano_temp.fichas[i], &apeada_calculada.grupos[g].fichas[c], sizeof(ficha_t)) == 0)
+                    if (memcmp(&mano_temp.cartas[i], &apeada_calculada.grupos[g].cartas[c], sizeof(carta_t)) == 0)
                     {
                         idx = i;
                         break;
@@ -1133,13 +1278,13 @@ apeada_t crear_mejor_apeada(jugador_t *jugador)
                 }
                 if (idx >= 0)
                 {
-                    remover_ficha(&mano_temp, idx);
+                    remover_carta(&mano_temp, idx);
                 }
             }
         }
 
         // Actualizar mano real del jugador
-        memcpy(jugador->mano.fichas, mano_temp.fichas, mano_temp.cantidad * sizeof(ficha_t));
+        memcpy(jugador->mano.cartas, mano_temp.cartas, mano_temp.cantidad * sizeof(carta_t));
         jugador->mano.cantidad = mano_temp.cantidad;
         mano_liberar(&mano_temp);
 
@@ -1154,23 +1299,23 @@ apeada_t crear_mejor_apeada(jugador_t *jugador)
     return mejor_apeada;
 }
 
-// Compara dos fichas para determinar si son iguales
-bool son_fichas_iguales(const ficha_t ficha1, const ficha_t ficha2)
+// Compara dos cartas para determinar si son iguales
+bool son_cartas_iguales(const carta_t carta1, const carta_t carta2)
 {
     // Comparar número y color
-    return (ficha1.numero == ficha2.numero && strcmp(ficha1.color, ficha2.color) == 0);
+    return (carta1.numero == carta2.numero && strcmp(carta1.color, carta2.color) == 0);
 }
 
-void eliminar_ficha_de_mano(mano_t *mano, ficha_t ficha)
+void eliminar_carta_de_mano(mano_t *mano, carta_t carta)
 {
     for (int i = 0; i < mano->cantidad; i++)
     {
-        if (son_fichas_iguales(mano->fichas[i], ficha))
+        if (son_cartas_iguales(mano->cartas[i], carta))
         {
-            // Mover las fichas restantes una posición hacia atrás
+            // Mover las cartas restantes una posición hacia atrás
             for (int j = i; j < mano->cantidad - 1; j++)
             {
-                mano->fichas[j] = mano->fichas[j + 1];
+                mano->cartas[j] = mano->cartas[j + 1];
             }
             mano->cantidad--;
             break;
@@ -1182,7 +1327,7 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa)
 {
     if (!jugador->en_juego || jugador->mano.cantidad < 3)
     {
-        printf("%s no puede realizar apeada (no está en juego o tiene muy pocas fichas).\n",
+        printf("%s no puede realizar apeada (no está en juego o tiene muy pocas cartas).\n",
                jugador->nombre);
         return false;
     }
@@ -1196,12 +1341,12 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa)
         if (puntos_apeada >= PUNTOS_MINIMOS_APEADA)
         {
             jugador->puntos_suficientes = true;
-            printf("\n%s ha realizado su primera apeada con %d puntos (mínimo requerido: %d)!\n",
+            printf("%s ha realizado su primera apeada con %d puntos (mínimo requerido: %d)!\n",
                    jugador->nombre, puntos_apeada, PUNTOS_MINIMOS_APEADA);
         }
         else
         {
-            printf("\n%s no alcanzó el mínimo de %d puntos para la primera apeada.\n",
+            printf("%s no alcanzó el mínimo de %d puntos para la primera apeada.\n",
                    jugador->nombre, PUNTOS_MINIMOS_APEADA);
             apeada_liberar(&apeada_jugador);
             return false;
@@ -1209,18 +1354,18 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa)
     }
     else if (puntos_apeada == 0)
     {
-        printf("\n%s no tiene combinaciones válidas para apear en este turno.\n", jugador->nombre);
+        printf("%s no tiene combinaciones válidas para apear en este turno.\n", jugador->nombre);
         apeada_liberar(&apeada_jugador);
         return false;
     }
 
-    // --- Nuevo: Eliminar fichas usadas en la apeada de la mano del jugador ---
+    // --- Nuevo: Eliminar cartas usadas en la apeada de la mano del jugador ---
     for (int i = 0; i < apeada_jugador.total_grupos; i++)
     {
         grupo_t *grupo = &apeada_jugador.grupos[i];
         for (int j = 0; j < grupo->cantidad; j++)
         {
-            eliminar_ficha_de_mano(&jugador->mano, grupo->fichas[j]);
+            eliminar_carta_de_mano(&jugador->mano, grupo->cartas[j]);
         }
     }
 
@@ -1229,7 +1374,7 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa)
         escalera_t *escalera = &apeada_jugador.escaleras[i];
         for (int j = 0; j < escalera->cantidad; j++)
         {
-            eliminar_ficha_de_mano(&jugador->mano, escalera->fichas[j]);
+            eliminar_carta_de_mano(&jugador->mano, escalera->cartas[j]);
         }
     }
 
@@ -1253,7 +1398,7 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa)
     pcbs[jugador->id - 1].escaleras_formadas += apeada_jugador.total_escaleras;
     pcbs[jugador->id - 1].puntos += puntos_apeada;
 
-    // Liberar recursos (solo estructuras, no las fichas transferidas)
+    // Liberar recursos (solo estructuras, no las cartas transferidas)
     free(apeada_jugador.grupos);
     free(apeada_jugador.escaleras);
 
@@ -1264,48 +1409,48 @@ bool realizar_apeada_optima(jugador_t *jugador, banco_de_apeadas_t *banco_mesa)
 // Funciones para embonar
 // ----------------------------------------------------------------------
 
-// Verifica si una ficha puede ser agregada a un grupo existente
-bool puede_embonar_grupo(const ficha_t *ficha, const grupo_t *grupo)
+// Verifica si una carta puede ser agregada a un grupo existente
+bool puede_embonar_grupo(const carta_t *carta, const grupo_t *grupo)
 {
-    // Si el grupo ya tiene el máximo de fichas
-    if (grupo->cantidad >= MAX_FICHAS_GRUPO)
+    // Si el grupo ya tiene el máximo de cartas
+    if (grupo->cantidad >= MAX_CARTAS_GRUPO)
         return false;
 
     // Buscar el número base del grupo (ignorando comodines)
     int numero_base = -1;
     for (int i = 0; i < grupo->cantidad; i++)
     {
-        if (grupo->fichas[i].numero != 0)
+        if (grupo->cartas[i].numero != 0)
         {
-            numero_base = grupo->fichas[i].numero;
+            numero_base = grupo->cartas[i].numero;
             break;
         }
     }
 
-    // Si todas son comodines, cualquier ficha puede unirse
+    // Si todas son comodines, cualquier carta puede unirse
     if (numero_base == -1)
         return true;
 
-    // La ficha debe coincidir con el número base o ser comodín
-    return (ficha->numero == numero_base || ficha->numero == 0);
+    // La carta debe coincidir con el número base o ser comodín
+    return (carta->numero == numero_base || carta->numero == 0);
 }
 
-// Verifica si una ficha puede ser agregada a una escalera existente
-bool puede_embonar_escalera(const ficha_t *ficha, const escalera_t *escalera)
+// Verifica si una carta puede ser agregada a una escalera existente
+bool puede_embonar_escalera(const carta_t *carta, const escalera_t *escalera)
 {
-    // Si la escalera ya tiene el máximo de fichas
-    if (escalera->cantidad >= MAX_FICHAS_ESCALERA)
+    // Si la escalera ya tiene el máximo de cartas
+    if (escalera->cantidad >= MAX_CARTAS_ESCALERA)
         return false;
 
     // Buscar color base y valores existentes
     char color_base[MAX_COLOR] = "";
-    int valores[MAX_FICHAS_ESCALERA];
+    int valores[MAX_CARTAS_ESCALERA];
     int num_valores = 0;
     int comodines = 0;
 
     for (int i = 0; i < escalera->cantidad; i++)
     {
-        if (escalera->fichas[i].numero == 0)
+        if (escalera->cartas[i].numero == 0)
         {
             comodines++;
         }
@@ -1313,20 +1458,20 @@ bool puede_embonar_escalera(const ficha_t *ficha, const escalera_t *escalera)
         {
             if (strlen(color_base) == 0)
             {
-                strcpy(color_base, escalera->fichas[i].color);
+                strcpy(color_base, escalera->cartas[i].color);
             }
-            valores[num_valores++] = escalera->fichas[i].numero;
+            valores[num_valores++] = escalera->cartas[i].numero;
         }
     }
 
-    // Si no hay fichas no-comodín, cualquier ficha del mismo color puede unirse
+    // Si no hay cartas no-comodín, cualquier carta del mismo color puede unirse
     if (num_valores == 0)
     {
-        return (strcmp(ficha->color, color_base) == 0 || strlen(color_base) == 0);
+        return (strcmp(carta->color, color_base) == 0 || strlen(color_base) == 0);
     }
 
     // Verificar color
-    if (strcmp(ficha->color, color_base) != 0 && ficha->numero != 0)
+    if (strcmp(carta->color, color_base) != 0 && carta->numero != 0)
     {
         return false;
     }
@@ -1345,20 +1490,20 @@ bool puede_embonar_escalera(const ficha_t *ficha, const escalera_t *escalera)
         }
     }
 
-    // Verificar si la ficha puede encajar en la secuencia
-    if (ficha->numero != 0)
+    // Verificar si la carta puede encajar en la secuencia
+    if (carta->numero != 0)
     { // No es comodín
         // Verificar si el número ya existe
         for (int i = 0; i < num_valores; i++)
         {
-            if (valores[i] == ficha->numero)
+            if (valores[i] == carta->numero)
             {
                 return false;
             }
         }
 
         // Verificar extremos
-        if (ficha->numero == valores[0] - 1 || ficha->numero == valores[num_valores - 1] + 1)
+        if (carta->numero == valores[0] - 1 || carta->numero == valores[num_valores - 1] + 1)
         {
             return true;
         }
@@ -1366,7 +1511,7 @@ bool puede_embonar_escalera(const ficha_t *ficha, const escalera_t *escalera)
         // Verificar huecos internos
         for (int i = 0; i < num_valores - 1; i++)
         {
-            if (ficha->numero > valores[i] && ficha->numero < valores[i + 1])
+            if (carta->numero > valores[i] && carta->numero < valores[i + 1])
             {
                 return true;
             }
@@ -1381,7 +1526,7 @@ bool puede_embonar_escalera(const ficha_t *ficha, const escalera_t *escalera)
 }
 
 // Intenta mover un comodín de un grupo a otro lugar para liberar espacio
-bool mover_comodin_para_embonar(banco_de_apeadas_t *banco, const ficha_t *ficha)
+bool mover_comodin_para_embonar(banco_de_apeadas_t *banco, const carta_t *carta)
 {
     // Buscar comodines en grupos
     for (int g = 0; g < banco->total_grupos; g++)
@@ -1391,37 +1536,37 @@ bool mover_comodin_para_embonar(banco_de_apeadas_t *banco, const ficha_t *ficha)
         // Buscar comodines en este grupo
         for (int i = 0; i < grupo->cantidad; i++)
         {
-            if (grupo->fichas[i].numero == 0)
+            if (grupo->cartas[i].numero == 0)
             { // Es comodín
                 // Intentar mover este comodín a una escalera
                 for (int e = 0; e < banco->total_escaleras; e++)
                 {
                     escalera_t *escalera = &banco->escaleras[e];
 
-                    if (escalera->cantidad < MAX_FICHAS_ESCALERA)
+                    if (escalera->cantidad < MAX_CARTAS_ESCALERA)
                     {
                         // Mover comodín del grupo a la escalera
-                        ficha_t comodin = grupo->fichas[i];
+                        carta_t comodin = grupo->cartas[i];
 
                         // Eliminar comodín del grupo
                         for (int j = i; j < grupo->cantidad - 1; j++)
                         {
-                            grupo->fichas[j] = grupo->fichas[j + 1];
+                            grupo->cartas[j] = grupo->cartas[j + 1];
                         }
                         grupo->cantidad--;
 
                         // Agregar comodín a la escalera
-                        escalera->fichas[escalera->cantidad++] = comodin;
+                        escalera->cartas[escalera->cantidad++] = comodin;
 
-                        // Ahora intentar embonar la ficha original en el grupo
-                        if (puede_embonar_grupo(ficha, grupo))
+                        // Ahora intentar embonar la carta original en el grupo
+                        if (puede_embonar_grupo(carta, grupo))
                         {
                             return true;
                         }
 
                         // Si no funciona, revertir el movimiento
                         // Devolver comodín al grupo
-                        grupo->fichas[grupo->cantidad++] = comodin;
+                        grupo->cartas[grupo->cantidad++] = comodin;
                         // Quitar de la escalera
                         escalera->cantidad--;
 
@@ -1440,37 +1585,37 @@ bool mover_comodin_para_embonar(banco_de_apeadas_t *banco, const ficha_t *ficha)
         // Buscar comodines en esta escalera
         for (int i = 0; i < escalera->cantidad; i++)
         {
-            if (escalera->fichas[i].numero == 0)
+            if (escalera->cartas[i].numero == 0)
             { // Es comodín
                 // Intentar mover este comodín a un grupo
                 for (int g = 0; g < banco->total_grupos; g++)
                 {
                     grupo_t *grupo = &banco->grupos[g];
 
-                    if (grupo->cantidad < MAX_FICHAS_GRUPO)
+                    if (grupo->cantidad < MAX_CARTAS_GRUPO)
                     {
                         // Mover comodín de la escalera al grupo
-                        ficha_t comodin = escalera->fichas[i];
+                        carta_t comodin = escalera->cartas[i];
 
                         // Eliminar comodín de la escalera
                         for (int j = i; j < escalera->cantidad - 1; j++)
                         {
-                            escalera->fichas[j] = escalera->fichas[j + 1];
+                            escalera->cartas[j] = escalera->cartas[j + 1];
                         }
                         escalera->cantidad--;
 
                         // Agregar comodín al grupo
-                        grupo->fichas[grupo->cantidad++] = comodin;
+                        grupo->cartas[grupo->cantidad++] = comodin;
 
-                        // Ahora intentar embonar la ficha original en la escalera
-                        if (puede_embonar_escalera(ficha, escalera))
+                        // Ahora intentar embonar la carta original en la escalera
+                        if (puede_embonar_escalera(carta, escalera))
                         {
                             return true;
                         }
 
                         // Si no funciona, revertir el movimiento
                         // Devolver comodín a la escalera
-                        escalera->fichas[escalera->cantidad++] = comodin;
+                        escalera->cartas[escalera->cantidad++] = comodin;
                         // Quitar del grupo
                         grupo->cantidad--;
 
@@ -1484,15 +1629,15 @@ bool mover_comodin_para_embonar(banco_de_apeadas_t *banco, const ficha_t *ficha)
     return false;
 }
 
-// Función para intentar embonar una ficha en un grupo o escalera
-bool intentar_embonar_ficha(ficha_t *ficha, banco_de_apeadas_t *banco)
+// Función para intentar embonar una carta en un grupo o escalera
+bool intentar_embonar_carta(carta_t *carta, banco_de_apeadas_t *banco)
 {
     // Intentar embonar en grupos
     for (int i = 0; i < banco->total_grupos; i++)
     {
-        if (puede_embonar_grupo(ficha, &banco->grupos[i]))
+        if (puede_embonar_grupo(carta, &banco->grupos[i]))
         {
-            banco->grupos[i].fichas[banco->grupos[i].cantidad++] = *ficha;
+            banco->grupos[i].cartas[banco->grupos[i].cantidad++] = *carta;
             return true;
         }
     }
@@ -1500,26 +1645,26 @@ bool intentar_embonar_ficha(ficha_t *ficha, banco_de_apeadas_t *banco)
     // Intentar embonar en escaleras
     for (int i = 0; i < banco->total_escaleras; i++)
     {
-        if (puede_embonar_escalera(ficha, &banco->escaleras[i]))
+        if (puede_embonar_escalera(carta, &banco->escaleras[i]))
         {
-            banco->escaleras[i].fichas[banco->escaleras[i].cantidad++] = *ficha;
+            banco->escaleras[i].cartas[banco->escaleras[i].cantidad++] = *carta;
             return true;
         }
     }
 
     // Si no se pudo embonar, intentar crear un nuevo grupo o escalera
-    if (banco->total_grupos < MAX_GRUPOS && es_grupo_valido(ficha, 1))
+    if (banco->total_grupos < MAX_GRUPOS && es_grupo_valido(carta, 1))
     {
         grupo_t *nuevo_grupo = &banco->grupos[banco->total_grupos++];
-        nuevo_grupo->fichas[0] = *ficha;
+        nuevo_grupo->cartas[0] = *carta;
         nuevo_grupo->cantidad = 1;
         return true;
     }
 
-    if (banco->total_escaleras < MAX_ESCALERAS && es_escalera_valida(ficha, 1))
+    if (banco->total_escaleras < MAX_ESCALERAS && es_escalera_valida(carta, 1))
     {
         escalera_t *nueva_escalera = &banco->escaleras[banco->total_escaleras++];
-        nueva_escalera->fichas[0] = *ficha;
+        nueva_escalera->cartas[0] = *carta;
         nueva_escalera->cantidad = 1;
         return true;
     }
@@ -1527,72 +1672,74 @@ bool intentar_embonar_ficha(ficha_t *ficha, banco_de_apeadas_t *banco)
     return false; // No se pudo embonar ni crear un nuevo grupo/escalera
 }
 
-// Función para intentar mover comodines y luego embonar la ficha
-bool intentar_mover_comodin_y_embonar(ficha_t *ficha, banco_de_apeadas_t *banco)
+// Función para intentar mover comodines y luego embonar la carta
+bool intentar_mover_comodin_y_embonar(carta_t *carta, banco_de_apeadas_t *banco)
 {
-    if (mover_comodin_para_embonar(banco, ficha))
+    if (mover_comodin_para_embonar(banco, carta))
     {
-        return intentar_embonar_ficha(ficha, banco);
+        return intentar_embonar_carta(carta, banco);
     }
     return false;
 }
 
-// Función principal para embonar una ficha del jugador al banco
-bool embonar_ficha(jugador_t *jugador, banco_de_apeadas_t *banco, int indice_ficha) {
-    if (indice_ficha < 0 || indice_ficha >= jugador->mano.cantidad) {
-        return false;
+// Función principal para embonar una carta del jugador al banco
+bool embonar_carta(jugador_t *jugador, banco_de_apeadas_t *banco, int indice_carta)
+{
+    if (indice_carta < 0 || indice_carta >= jugador->mano.cantidad)
+    {
+        return false; // Índice inválido
     }
 
-    ficha_t ficha = jugador->mano.fichas[indice_ficha];
+    carta_t carta = jugador->mano.cartas[indice_carta];
 
     // Intentar embonar directamente
-    if (intentar_embonar_ficha(&ficha, banco))
+    if (intentar_embonar_carta(&carta, banco))
     {
-        remover_ficha(&jugador->mano, indice_ficha);
+        remover_carta(&jugador->mano, indice_carta);
         return true;
     }
 
     // Intentar mover comodines y luego embonar
-    if (intentar_mover_comodin_y_embonar(&ficha, banco))
+    if (intentar_mover_comodin_y_embonar(&carta, banco))
     {
-        remover_ficha(&jugador->mano, indice_ficha);
+        remover_carta(&jugador->mano, indice_carta);
         return true;
     }
 
     // Intentar crear un nuevo grupo o escalera
-    if (banco->total_grupos < MAX_GRUPOS && es_grupo_valido(&ficha, 1))
+    if (banco->total_grupos < MAX_GRUPOS && es_grupo_valido(&carta, 1))
     {
         grupo_t *nuevo_grupo = &banco->grupos[banco->total_grupos++];
-        nuevo_grupo->fichas[0] = ficha;
+        nuevo_grupo->cartas[0] = carta;
         nuevo_grupo->cantidad = 1;
-        remover_ficha(&jugador->mano, indice_ficha);
+        remover_carta(&jugador->mano, indice_carta);
         return true;
     }
 
-    if (banco->total_escaleras < MAX_ESCALERAS && es_escalera_valida(&ficha, 1))
+    if (banco->total_escaleras < MAX_ESCALERAS && es_escalera_valida(&carta, 1))
     {
         escalera_t *nueva_escalera = &banco->escaleras[banco->total_escaleras++];
-        nueva_escalera->fichas[0] = ficha;
+        nueva_escalera->cartas[0] = carta;
         nueva_escalera->cantidad = 1;
-        remover_ficha(&jugador->mano, indice_ficha);
+        remover_carta(&jugador->mano, indice_carta);
         return true;
     }
 
     return false; // No se pudo embonar ni crear un nuevo grupo/escalera
 }
 
-// Verifica si una ficha puede embonar en algún grupo o escalera del banco
+// Verifica si una carta puede embonar en algún grupo o escalera del banco
 bool existe_embon_posible_aux(const jugador_t *jugador, const banco_de_apeadas_t *banco)
 {
     // 1. Verificar embón en grupos/escaleras existentes
     for (int i = 0; i < jugador->mano.cantidad; i++)
     {
-        const ficha_t *ficha = &jugador->mano.fichas[i];
+        const carta_t *carta = &jugador->mano.cartas[i];
 
         // Verificar grupos
         for (int g = 0; g < banco->total_grupos; g++)
         {
-            if (puede_embonar_grupo(ficha, &banco->grupos[g]))
+            if (puede_embonar_grupo(carta, &banco->grupos[g]))
             {
                 return true;
             }
@@ -1601,7 +1748,7 @@ bool existe_embon_posible_aux(const jugador_t *jugador, const banco_de_apeadas_t
         // Verificar escaleras
         for (int e = 0; e < banco->total_escaleras; e++)
         {
-            if (puede_embonar_escalera(ficha, &banco->escaleras[e]))
+            if (puede_embonar_escalera(carta, &banco->escaleras[e]))
             {
                 return true;
             }
@@ -1613,32 +1760,32 @@ bool existe_embon_posible_aux(const jugador_t *jugador, const banco_de_apeadas_t
     {
         for (int i = 0; i < jugador->mano.cantidad; i++)
         {
-            const ficha_t *ficha = &jugador->mano.fichas[i];
+            const carta_t *carta = &jugador->mano.cartas[i];
 
-            // Crear nuevo grupo (necesita al menos 2 fichas iguales + comodines)
+            // Crear nuevo grupo (necesita al menos 2 cartas iguales + comodines)
             if (banco->total_grupos < MAX_GRUPOS)
             {
                 int contador = 0;
                 for (int j = 0; j < jugador->mano.cantidad; j++)
                 {
-                    if (i != j && (jugador->mano.fichas[j].numero == ficha->numero ||
-                                   jugador->mano.fichas[j].numero == 0))
+                    if (i != j && (jugador->mano.cartas[j].numero == carta->numero ||
+                                   jugador->mano.cartas[j].numero == 0))
                     {
                         contador++;
                         if (contador >= 2)
-                            return true; // 2 fichas iguales o 1 + comodín
+                            return true; // 2 cartas iguales o 1 + comodín
                     }
                 }
             }
 
-            // Crear nueva escalera (necesita fichas consecutivas del mismo color)
+            // Crear nueva escalera (necesita cartas consecutivas del mismo color)
             if (banco->total_escaleras < MAX_ESCALERAS)
             {
                 for (int j = 0; j < jugador->mano.cantidad; j++)
                 {
-                    if (i != j && strcmp(jugador->mano.fichas[j].color, ficha->color) == 0)
+                    if (i != j && strcmp(jugador->mano.cartas[j].color, carta->color) == 0)
                     {
-                        int diff = abs(jugador->mano.fichas[j].numero - ficha->numero);
+                        int diff = abs(jugador->mano.cartas[j].numero - carta->numero);
                         if (diff <= 2 || diff == 12)
                         { // Ej: Q-K-A o 2-3-4
                             return true;
@@ -1663,20 +1810,20 @@ int calcular_puntos_mano(const mano_t *mano)
     for (int i = 0; i < mano->cantidad; i++)
     {
         // Comodines valen 20 puntos
-        if (mano->fichas[i].numero == 0)
+        if (mano->cartas[i].numero == 0)
         {
             puntos += 20;
         }
-        // Fichas normales valen su valor numérico
+        // Cartas normales valen su valor numérico
         else
         {
-            puntos += mano->fichas[i].numero;
+            puntos += mano->cartas[i].numero;
         }
     }
     return puntos;
 }
 
-// Verifica si un jugador ha ganado (se quedó sin fichas)
+// Verifica si un jugador ha ganado (se quedó sin cartas)
 bool jugador_ha_ganado(const jugador_t *jugador)
 {
     return jugador->mano.cantidad == 0;
@@ -1685,7 +1832,7 @@ bool jugador_ha_ganado(const jugador_t *jugador)
 // Determina el índice del jugador ganador
 int determinar_ganador(jugador_t *jugadores, int num_jugadores, bool mazo_vacio)
 {
-    // Primero verificar si algún jugador se quedó sin fichas
+    // Primero verificar si algún jugador se quedó sin cartas
     for (int i = 0; i < num_jugadores; i++)
     {
         if (jugador_ha_ganado(&jugadores[i]))
@@ -1719,42 +1866,6 @@ int determinar_ganador(jugador_t *jugadores, int num_jugadores, bool mazo_vacio)
 // ----------------------------------------------------------------------
 // Funciones para el Mazo
 // ----------------------------------------------------------------------
-void inicializar_mazo(mazo_t *mazo)
-{
-    const char *colores[] = {"rojo", "negro", "azul", "amarillo"};
-    int index = 0;
-
-    // Generar las 104 fichas normales (2 juegos de 1-13 en 4 colores)
-    for (int k = 0; k < 2; k++)
-    {
-        for (int c = 0; c < 4; c++)
-        {
-            for (int n = 1; n <= 13; n++)
-            {
-                mazo->fichas[index].numero = n;
-                strcpy(mazo->fichas[index].color, colores[c]);
-                index++;
-            }
-        }
-    }
-
-    // Agregar los 4 comodines
-    for (int j = 0; j < 4; j++)
-    {
-        mazo->fichas[index].numero = 0;
-        strcpy(mazo->fichas[index].color, "comodin");
-        index++;
-    }
-
-    mazo->cantidad = index;
-
-    // Validar que el mazo tenga exactamente 108 fichas
-    if (mazo->cantidad != MAX_FICHAS)
-    {
-        fprintf(stderr, "Error: El mazo no tiene 108 fichas. Tiene %d fichas.\n", mazo->cantidad);
-        exit(EXIT_FAILURE);
-    }
-}
 
 void barajar_mazo(mazo_t *mazo)
 {
@@ -1762,140 +1873,330 @@ void barajar_mazo(mazo_t *mazo)
     for (int i = 0; i < mazo->cantidad; i++)
     {
         int j = rand() % mazo->cantidad;
-        ficha_t temp = mazo->fichas[i];
-        mazo->fichas[i] = mazo->fichas[j];
-        mazo->fichas[j] = temp;
+        carta_t temp = mazo->cartas[i];
+        mazo->cartas[i] = mazo->cartas[j];
+        mazo->cartas[j] = temp;
     }
 }
 
 // ----------------------------------------------------------------------
 // Funciones para la Mano
 // ----------------------------------------------------------------------
-void agregar_ficha(mano_t *mano, ficha_t ficha)
+void agregar_carta(mano_t *mano, carta_t carta)
 {
     if (mano->cantidad < mano->capacidad)
     {
-        mano->fichas[mano->cantidad] = ficha;
+        mano->cartas[mano->cantidad] = carta;
         mano->cantidad++;
     }
     else
     {
         // Si la mano está llena, aumentar la capacidad y reasignar memoria
         mano->capacidad *= 2;
-        mano->fichas = realloc(mano->fichas, sizeof(ficha_t) * mano->capacidad);
-        if (mano->fichas == NULL)
+        mano->cartas = realloc(mano->cartas, sizeof(carta_t) * mano->capacidad);
+        if (mano->cartas == NULL)
         {
             fprintf(stderr, "Error al reasignar memoria para la mano\n");
             exit(EXIT_FAILURE);
         }
-        mano->fichas[mano->cantidad] = ficha;
+        mano->cartas[mano->cantidad] = carta;
         mano->cantidad++;
     }
 }
 
 void mostrar_mano(mano_t *mano)
 {
-    printf("\nFichas en mano (%d):\n", mano->cantidad);
-    printf("────────────────────────\n");
+    printf("Cartas en mano (%d):\n", mano->cantidad);
     for (int i = 0; i < mano->cantidad; i++)
     {
-        if (mano->fichas[i].numero == 0)
+        if (mano->cartas[i].numero == 0)
         {
-            printf("[%2d] Comodín\n", i + 1);
+            printf("Comodin\n");
         }
         else
         {
-            printf("[%2d] %2d de %s\n", 
-                   i + 1, 
-                   mano->fichas[i].numero, 
-                   mano->fichas[i].color);
+            printf("%d de %s\n", mano->cartas[i].numero, mano->cartas[i].color);
         }
     }
-    printf("────────────────────────\n");
 }
 
 void finalizar_turno(jugador_t *jugador)
 {
-    jugador->ficha_agregada = false; // Reinicia la bandera para el próximo turno
+    jugador->carta_agregada = false; // Reinicia la bandera para el próximo turno
+}
+
+// ----------------------------------------------------------------------
+// Funciones para Manipular el mapa de Bits
+// ----------------------------------------------------------------------
+
+// Establecer un bit como ocupado (1)
+void establecer_bit(ManejadorMemoriaMapaBits *manejador, int posicion) {
+    int indice_byte = posicion / 8;
+    int indice_bit = posicion % 8;
+    manejador->mapa_bits[indice_byte] |= (1 << indice_bit);
+    manejador->bloques_libres--;
+}
+
+// Limpiar un bit (liberar, poner a 0)
+void limpiar_bit(ManejadorMemoriaMapaBits *manejador, int posicion) {
+    int indice_byte = posicion / 8;
+    int indice_bit = posicion % 8;
+    manejador->mapa_bits[indice_byte] &= ~(1 << indice_bit);
+    manejador->bloques_libres++;
+}
+
+// Verificar si un bit está ocupado
+int probar_bit(ManejadorMemoriaMapaBits *manejador, int posicion) {
+    int indice_byte = posicion / 8;
+    int indice_bit = posicion % 8;
+    return (manejador->mapa_bits[indice_byte] & (1 << indice_bit)) != 0;
+}
+
+// Asignar bloques contiguos usando mapa de bits
+int asignar_memoria_mapa(ManejadorMemoriaMapaBits *manejador, int tamano_requerido) {
+    int bloques_necesarios = (tamano_requerido + TAMANO_BLOQUE - 1) / TAMANO_BLOQUE;
+    int libres_consecutivos = 0;
+    int bloque_inicio = -1;
+    
+    if (bloques_necesarios > manejador->bloques_libres) {
+        return -1;  // No hay suficiente memoria
+    }
+    
+    // Buscar bloques contiguos libres
+    for (int i = 0; i < manejador->bloques_totales; i++) {
+        if (!probar_bit(manejador, i)) {
+            if (libres_consecutivos == 0) {
+                bloque_inicio = i;
+            }
+            libres_consecutivos++;
+            
+            if (libres_consecutivos == bloques_necesarios) {
+                // Marcar los bloques como ocupados
+                for (int j = bloque_inicio; j < bloque_inicio + bloques_necesarios; j++) {
+                    establecer_bit(manejador, j);
+                }
+                return bloque_inicio * TAMANO_BLOQUE;  // Devuelve la dirección base
+            }
+        } else {
+            libres_consecutivos = 0;
+            bloque_inicio = -1;
+        }
+    }
+    
+    return -1;  // No se encontró espacio contiguo suficiente
+}
+
+// Liberar bloques de memoria
+void liberar_memoria_mapa(ManejadorMemoriaMapaBits *manejador, int direccion_base, int tamano) {
+    int bloque_inicio = direccion_base / TAMANO_BLOQUE;
+    int bloques_a_liberar = (tamano + TAMANO_BLOQUE - 1) / TAMANO_BLOQUE;
+    
+    for (int i = bloque_inicio; i < bloque_inicio + bloques_a_liberar; i++) {
+        if (probar_bit(manejador, i)) {
+            limpiar_bit(manejador, i);
+        }
+    }
+}
+
+// Mostrar el estado actual del mapa de bits
+void imprimir_mapa_bits(ManejadorMemoriaMapaBits *manejador) {
+    printf("Estado de la memoria (0=libre, 1=ocupado):\n");
+    printf("Bloques totales: %d, Bloques libres: %d\n", 
+           manejador->bloques_totales, manejador->bloques_libres);
+    
+    for (int i = 0; i < manejador->bloques_totales; i++) {
+        if (i % 64 == 0) printf("\n");
+        printf("%d", probar_bit(manejador, i));
+    }
+    printf("\n");
+}
+
+// ----------------------------------------------------------------------
+// Funciones para la Gestión de Memoria (Lista Ligada)
+// ----------------------------------------------------------------------
+
+//Inicialización de la Memoria
+void inicializar_memoria(GestionMemoria *gm, int tamano_total) {
+    gm->memoria_total = tamano_total;
+    gm->lista_bloques = (BloqueMemoria*)malloc(sizeof(BloqueMemoria));
+    
+    gm->lista_bloques->inicio = 0;
+    gm->lista_bloques->tamano = tamano_total;
+    gm->lista_bloques->disponible = 1;
+    gm->lista_bloques->siguiente = NULL;
+}
+
+//Algoritmo de Mejor Ajuste
+BloqueMemoria* mejor_ajuste(GestionMemoria *gm, int tamano_solicitado) {
+    BloqueMemoria *actual = gm->lista_bloques;
+    BloqueMemoria *mejor_bloque = NULL;
+    int menor_diferencia = gm->memoria_total + 1; // Valor mayor al máximo posible
+    
+    while (actual != NULL) {
+        if (actual->disponible && actual->tamano >= tamano_solicitado) {
+            int diferencia = actual->tamano - tamano_solicitado;
+            if (diferencia < menor_diferencia) {
+                menor_diferencia = diferencia;
+                mejor_bloque = actual;
+            }
+        }
+        actual = actual->siguiente;
+    }
+    
+    return mejor_bloque;
+}
+
+//Asignación de Memoria
+int asignar_memoria_lista(GestionMemoria *gm, int tamano_solicitado) {
+    BloqueMemoria *bloque = mejor_ajuste(gm, tamano_solicitado);
+    
+    if (bloque == NULL) {
+        return -1; // No hay memoria disponible
+    }
+    
+    // Si el bloque es exacto
+    if (bloque->tamano == tamano_solicitado) {
+        bloque->disponible = 0;
+        return bloque->inicio;
+    } else {
+        // Crear nuevo bloque para el espacio sobrante
+        BloqueMemoria *nuevo_bloque = (BloqueMemoria*)malloc(sizeof(BloqueMemoria));
+        nuevo_bloque->inicio = bloque->inicio + tamano_solicitado;
+        nuevo_bloque->tamano = bloque->tamano - tamano_solicitado;
+        nuevo_bloque->disponible = 1;
+        nuevo_bloque->siguiente = bloque->siguiente;
+        
+        // Modificar el bloque actual
+        bloque->tamano = tamano_solicitado;
+        bloque->disponible = 0;
+        bloque->siguiente = nuevo_bloque;
+        
+        return bloque->inicio;
+    }
+}
+
+//Liberación de Memoria
+void liberar_memoria_lista(GestionMemoria *gm, int direccion, int tamano) {
+    BloqueMemoria *actual = gm->lista_bloques;
+    BloqueMemoria *anterior = NULL;
+    
+    // Buscar el bloque a liberar
+    while (actual != NULL && actual->inicio != direccion) {
+        anterior = actual;
+        actual = actual->siguiente;
+    }
+    
+    if (actual != NULL && !actual->disponible) {
+        actual->disponible = 1;
+        
+        // Fusionar con bloque anterior si está libre
+        if (anterior != NULL && anterior->disponible) {
+            anterior->tamano += actual->tamano;
+            anterior->siguiente = actual->siguiente;
+            free(actual);
+            actual = anterior;
+        }
+        
+        // Fusionar con bloque siguiente si está libre
+        if (actual->siguiente != NULL && actual->siguiente->disponible) {
+            actual->tamano += actual->siguiente->tamano;
+            BloqueMemoria *temp = actual->siguiente;
+            actual->siguiente = temp->siguiente;
+            free(temp);
+        }
+    }
+}
+
+//Visualización del Estado de la Memoria
+void mostrar_memoria(GestionMemoria *gm) {
+    BloqueMemoria *actual = gm->lista_bloques;
+    printf("Estado de la memoria:\n");
+    printf("Total: %d unidades\n", gm->memoria_total);
+    printf("--------------------------------\n");
+    
+    while (actual != NULL) {
+        printf("[%d-%d] %s (%d unidades)\n", 
+               actual->inicio, 
+               actual->inicio + actual->tamano - 1,
+               actual->disponible ? "Libre" : "Ocupado",
+               actual->tamano);
+        actual = actual->siguiente;
+    }
+    printf("--------------------------------\n");
 }
 
 // ----------------------------------------------------------------------
 // Funciones de Inicialización de Jugadores y PCB
 // ----------------------------------------------------------------------
-void inicializar_jugador(jugador_t *jugador, int id, char nombre[], ficha_t fichas[], int cantidad)
-{
-    jugador->id = id;
-    strcpy(jugador->nombre, nombre);
-    jugador->mano.cantidad = 0;
-    // Suponemos que "cantidad" es el número de fichas iniciales
-    for (int i = 0; i < cantidad; i++)
-    {
-        agregar_ficha(&(jugador->mano), fichas[i]);
-    }
-}
 
-void escribir_pcb(pcb_t jugador)
-{
+void escribir_pcb(pcb_t jugador) {
     char filename[30];
     sprintf(filename, "PCB_Jugador%d.txt", jugador.id_jugador);
 
     FILE *file = fopen(filename, "w");
-    if (file == NULL)
-    {
+    if (file == NULL) {
         printf("Error al abrir %s\n", filename);
         return;
     }
 
     // Convertir el estado a texto
-    const char *estado_str = (jugador.estado == LISTO) ? "LISTO" : (jugador.estado == EJECUTANDO) ? "EJECUTANDO"
-                                                                                                  : "DE_ESPERA";
+    const char *estado_str;
+    switch(jugador.estado) {
+        case LISTO: estado_str = "LISTO"; break;
+        case EJECUTANDO: estado_str = "EJECUTANDO"; break;
+        case BLOQUEADO: estado_str = "BLOQUEADO"; break;
+        default: estado_str = "DESCONOCIDO";
+    }
 
     // Escribir los datos del PCB en el archivo
+    fprintf(file, "=== PCB del Jugador ===\n");
     fprintf(file, "ID: %d\n", jugador.id_jugador);
     fprintf(file, "Nombre: %s\n", jugador.nombre);
-    fprintf(file, "Fichas en Mano: %d\n", jugador.fichas_en_mano);
-    fprintf(file, "Puntos: %d\n", jugador.puntos);
-    fprintf(file, "Partidas Jugadas: %d\n", jugador.partidas_jugadas);
-    fprintf(file, "Partidas Ganadas: %d\n", jugador.partidas_ganadas);
-    fprintf(file, "Partidas Perdidas: %d\n", jugador.partidas_perdidas);
     fprintf(file, "Estado: %s\n", estado_str);
-    fprintf(file, "Tiempo Total de Juego: %d\n", jugador.tiempo_total_juego);
+    fprintf(file, "\n=== Estadísticas del Juego ===\n");
+    fprintf(file, "Cartas en Mano: %d\n", jugador.cartas_en_mano);
+    fprintf(file, "Puntos Acumulados: %d\n", jugador.puntos);
     fprintf(file, "Turnos Jugados: %d\n", jugador.turnos_jugados);
-    fprintf(file, "Fichas Robadas: %d\n", jugador.fichas_robadas);
-    fprintf(file, "Fichas Desfichadas: %d\n", jugador.fichas_desfichadas);
+    fprintf(file, "Cartas Robadas: %d\n", jugador.cartas_robadas);
+    fprintf(file, "Cartas Embonadas: %d\n", jugador.cartas_embonadas);
     fprintf(file, "Grupos Formados: %d\n", jugador.grupos_formados);
     fprintf(file, "Escaleras Formadas: %d\n", jugador.escaleras_formadas);
-    fprintf(file, "Victorias con Escalera: %d\n", jugador.victorias_con_escalera);
-    fprintf(file, "Tiempo Restante: %d\n", jugador.tiempo_restante);
-    fprintf(file, "Tiempo Bloqueado: %d\n", jugador.tiempo_de_espera);
+    fprintf(file, "\n=== Tiempos ===\n");
+    fprintf(file, "Tiempo Restante (turno actual): %d\n", jugador.tiempo_restante);
+    fprintf(file, "Tiempo Total en Turnos: %d\n", jugador.tiempo_en_turno);
+    fprintf(file, "Tiempo Bloqueado: %d\n", jugador.tiempo_bloqueado);
+    fprintf(file, "Tiempo Total de Juego: %d\n", jugador.tiempo_total_juego);
+    fprintf(file, "\n=== Recursos ===\n");
+    fprintf(file, "Memoria Asignada: %d KB\n", jugador.memoria_asignada);
 
     fclose(file);
+    printf("PCB del jugador %d guardado en %s\n", jugador.id_jugador, filename);
 }
 
 void actualizar_y_escribir_pcb(pcb_t *pcb, jugador_t *jugador)
 {
-    // Guardamos la cantidad de fichas anterior
-    int fichas_anteriores = pcb->fichas_en_mano;
+    // Guardamos la cantidad de cartas anterior
+    int cartas_anteriores = pcb->cartas_en_mano;
 
     // Actualizar información básica del jugador
     pcb->id_jugador = jugador->id;
     strcpy(pcb->nombre, jugador->nombre);
-    pcb->fichas_en_mano = jugador->mano.cantidad;
+    pcb->cartas_en_mano = jugador->mano.cantidad;
 
     // Actualizar puntos acumulados
     pcb->puntos = calcular_puntos_mano(&jugador->mano);
 
-    // Verificar si robó ficha(s)
-    if (jugador->mano.cantidad > fichas_anteriores)
+    // Verificar si robó carta(s)
+    if (jugador->mano.cantidad > cartas_anteriores)
     {
-        int robadas = jugador->mano.cantidad - fichas_anteriores;
-        pcb->fichas_robadas += robadas;
+        int robadas = jugador->mano.cantidad - cartas_anteriores;
+        pcb->cartas_robadas += robadas;
     }
 
     // Determinar el estado del jugador
     if (!jugador->en_juego)
     {
-        pcb->estado = DE_ESPERA;
+        pcb->estado = BLOQUEADO;
     }
     else if (jugador->tiempo_restante > 0)
     {
@@ -1916,10 +2217,10 @@ void actualizar_y_escribir_pcb(pcb_t *pcb, jugador_t *jugador)
         pcb->tiempo_total_juego += jugador->tiempo_restante;
     }
 
-    // Si está de_espera, aumentar tiempo de_espera
-    if (pcb->estado == DE_ESPERA)
+    // Si está bloqueado, aumentar tiempo bloqueado
+    if (pcb->estado == BLOQUEADO)
     {
-        pcb->tiempo_de_espera++;
+        pcb->tiempo_bloqueado++;
     }
 
     // Escribir PCB actualizado a archivo
@@ -1935,38 +2236,46 @@ void actualizar_tabla_procesos(pcb_t jugadores[], int num_jugadores)
         return;
     }
 
-    fprintf(file, "ID\tNombre\tFichas\tPuntos\tEstado\tTurnos\tRobadas\tDesfichadas\tGrupos\tEscaleras\tTiempoJ\tTiempoBloq\n");
+    // Encabezado de la tabla
+    fprintf(file, "ID\tNombre\tCartas\tPuntos\tEstado\tTurnos\tRobadas\tGrupos\tEscaleras\tTiempoJ\tTiempoBloq\n");
 
     for (int i = 0; i < num_jugadores; i++)
     {
-        const char *estado_str = (jugadores[i].estado == LISTO) ? "LISTO" : (jugadores[i].estado == EJECUTANDO) ? "EJECUTANDO"
-                                                                                                                : "DE_ESPERA";
+        // Convertir el estado a texto
+        const char *estado_str = (jugadores[i].estado == LISTO) ? "LISTO" :
+                                 (jugadores[i].estado == EJECUTANDO) ? "EJECUTANDO" : "BLOQUEADO";
 
-        fprintf(file, "%d\t%s\t%d\t%d\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
-                jugadores[i].id_jugador, jugadores[i].nombre,
-                jugadores[i].fichas_en_mano, jugadores[i].puntos,
-                estado_str, jugadores[i].turnos_jugados,
-                jugadores[i].fichas_robadas, jugadores[i].fichas_desfichadas,
-                jugadores[i].grupos_formados, jugadores[i].escaleras_formadas,
-                jugadores[i].tiempo_total_juego, jugadores[i].tiempo_de_espera);
+        // Escribir los datos del jugador en la tabla
+        fprintf(file, "%d\t%s\t%d\t%d\t%s\t%d\t%d\t%d\t%d\t%d\t%d\n",
+                jugadores[i].id_jugador,
+                jugadores[i].nombre,
+                jugadores[i].cartas_en_mano,
+                jugadores[i].puntos,
+                estado_str,
+                jugadores[i].turnos_jugados,
+                jugadores[i].cartas_robadas,
+                jugadores[i].grupos_formados,
+                jugadores[i].escaleras_formadas,
+                jugadores[i].tiempo_total_juego,
+                jugadores[i].tiempo_bloqueado);
     }
 
     fclose(file);
 }
 
 // ----------------------------------------------------------------------
-// Función para repartir fichas entre jugadores y mostrar banco de apeadas
+// Función para repartir cartas entre jugadores y mostrar banco de apeadas
 // ----------------------------------------------------------------------
-void repartir_fichas(jugador_t jugadores[], int num_jugadores, mazo_t *mazo)
+void repartir_cartas(jugador_t jugadores[], int num_jugadores, mazo_t *mazo)
 {
-    int fichas_por_jugador = (mazo->cantidad * 2) / (3 * num_jugadores);
+    int cartas_por_jugador = (mazo->cantidad * 2) / (3 * num_jugadores);
     int index = 0;
 
     for (int i = 0; i < num_jugadores; i++)
     {
-        for (int j = 0; j < fichas_por_jugador; j++)
+        for (int j = 0; j < cartas_por_jugador; j++)
         {
-            agregar_ficha(&(jugadores[i].mano), mazo->fichas[index]);
+            agregar_carta(&(jugadores[i].mano), mazo->cartas[index]);
             index++;
         }
     }
@@ -1978,7 +2287,7 @@ void mostrar_banco(const banco_de_apeadas_t *banco)
 {
     if (banco == NULL)
     {
-        printf("\nEl banco de apeadas está vacío.\n");
+        printf("El banco de apeadas está vacío.\n");
         return;
     }
 
@@ -1993,13 +2302,13 @@ void mostrar_banco(const banco_de_apeadas_t *banco)
             printf("Grupo %d: ", i + 1);
             for (int j = 0; j < banco->grupos[i].cantidad; j++)
             {
-                if (banco->grupos[i].fichas[j].numero == 0)
+                if (banco->grupos[i].cartas[j].numero == 0)
                 {
                     printf("[Comodín] ");
                 }
                 else
                 {
-                    printf("[%d %s] ", banco->grupos[i].fichas[j].numero, banco->grupos[i].fichas[j].color);
+                    printf("[%d %s] ", banco->grupos[i].cartas[j].numero, banco->grupos[i].cartas[j].color);
                 }
             }
             printf("\n");
@@ -2007,7 +2316,7 @@ void mostrar_banco(const banco_de_apeadas_t *banco)
     }
     else
     {
-        printf("\nNo hay grupos en el banco.\n");
+        printf("No hay grupos en el banco.\n");
     }
 
     // Mostrar escaleras
@@ -2019,13 +2328,13 @@ void mostrar_banco(const banco_de_apeadas_t *banco)
             printf("Escalera %d: ", i + 1);
             for (int j = 0; j < banco->escaleras[i].cantidad; j++)
             {
-                if (banco->escaleras[i].fichas[j].numero == 0)
+                if (banco->escaleras[i].cartas[j].numero == 0)
                 {
                     printf("[Comodín] ");
                 }
                 else
                 {
-                    printf("[%d %s] ", banco->escaleras[i].fichas[j].numero, banco->escaleras[i].fichas[j].color);
+                    printf("[%d %s] ", banco->escaleras[i].cartas[j].numero, banco->escaleras[i].cartas[j].color);
                 }
             }
             printf("\n");
@@ -2033,7 +2342,7 @@ void mostrar_banco(const banco_de_apeadas_t *banco)
     }
     else
     {
-        printf("\nNo hay escaleras en el banco.\n");
+        printf("No hay escaleras en el banco.\n");
     }
 
     printf("────────────────────────────\n");
@@ -2043,10 +2352,57 @@ void mostrar_banco(const banco_de_apeadas_t *banco)
 // Funciones de Concurrencia y Manejo de Turnos
 // ----------------------------------------------------------------------
 
-// Hilo principal que controla el estado global del juego
+// Función auxiliar para manejar al ganador
+void manejar_ganador(int ganador)
+{
+    printf("\n¡Jugador %d (%s) ha ganado!\n", jugadores[ganador].id, jugadores[ganador].nombre);
+
+    // Actualizar estadísticas de todos los jugadores
+    for (int i = 0; i < NUM_JUGADORES; i++)
+    {
+        if (i != ganador)
+        {
+            pcbs[i].cartas_en_mano = jugadores[i].mano.cantidad; // Actualizar cartas restantes
+        }
+        escribir_pcb(pcbs[i]); // Guardar el PCB actualizado
+    }
+
+    // Marcar el juego como terminado
+    pthread_mutex_lock(&mutex_terminacion);
+    juego_terminado = true;
+    pthread_mutex_unlock(&mutex_terminacion);
+
+    pthread_cond_broadcast(&cond_turno); // Notificar a todos los hilos
+}
+
+// Función auxiliar para manejar el cambio de política de planificación
+void manejar_cambio_politica()
+{
+    if (kbhit())
+    {
+        char c = getchar();
+        if (c == 'F' || c == 'f')
+        {
+            modo = 'F';
+            printf("\n✔ Política cambiada a FCFS: Turnos completos en orden de llegada\n");
+        }
+        else if (c == 'R' || c == 'r')
+        {
+            modo = 'R';
+            printf("\n✔ Política cambiada a Round Robin: Quantum de %d segundos\n", QUANTUM);
+        }
+        else
+        {
+            printf("\n➜ Entrada inválida. Manteniendo política actual: %s\n",
+                   (modo == 'F') ? "FCFS" : "Round Robin");
+        }
+    }
+}
+
+/// Hilo principal que controla el estado global del juego
 void *hilo_juego_func(void *arg)
 {
-    while (1)
+    while (!juego_terminado)
     {
         pthread_mutex_lock(&mutex);
 
@@ -2054,69 +2410,59 @@ void *hilo_juego_func(void *arg)
         int ganador = determinar_ganador(jugadores, NUM_JUGADORES, mazo.cantidad == 0);
         if (ganador != -1)
         {
-            printf("\n¡Jugador %d (%s) ha ganado!\n", jugadores[ganador].id, jugadores[ganador].nombre);
-
-            // Actualizar estadísticas de todos los jugadores
-            for (int i = 0; i < NUM_JUGADORES; i++)
-            {
-                pcbs[i].partidas_jugadas++;
-                if (i == ganador)
-                    pcbs[i].partidas_ganadas++;
-                else
-                    pcbs[i].partidas_perdidas++;
-                escribir_pcb(pcbs[i]);
-            }
-
-            exit(0);
+            manejar_ganador(ganador);
+            pthread_mutex_unlock(&mutex);
+            break; // Salir del bucle principal
         }
 
         // Cambiar política de planificación con teclas F/R
-        if (kbhit())
-        {
-            char c = getchar();
-            if (c == 'F' || c == 'f')
-                modo = 'F';
-            else if (c == 'R' || c == 'r')
-                modo = 'R';
-            printf("\nPolítica cambiada a %c\n", modo);
-        }
+        manejar_cambio_politica();
 
         pthread_mutex_unlock(&mutex);
         sleep(1); // Revisar estado cada segundo
     }
+
     return NULL;
 }
 
 // Hilo planificador gestiona turnos de los jugadores
-void *planificador(void *arg) {
+void *planificador(void *arg)
+{
     hilo_control_t *control = (hilo_control_t *)arg;
     struct timespec sleep_time = {0, 100000000}; // 100ms
 
-    while (!*(control->terminar_flag)) {
-        pthread_mutex_lock(control->mutex);
-        
-        if (proceso_en_ejecucion == -1 && !cola_vacia()) {
+    while (!*(control->terminar_flag))
+    {
+        pthread_mutex_lock(&mutex);
+
+        if (proceso_en_ejecucion == -1)
+        {
             int siguiente = siguiente_turno();
-            if (siguiente >= 1 && siguiente <= NUM_JUGADORES) {
+            if (siguiente != -1)
+            {
                 proceso_en_ejecucion = siguiente;
-                pcbs[siguiente-1].estado = EJECUTANDO;
-                
-                pthread_t hilo;
-                if (pthread_create(&hilo, NULL, jugador_thread, &jugadores[siguiente-1]) == 0) {
-                    pthread_detach(hilo);
-                }
-                
-                struct timespec ts;
-                clock_gettime(CLOCK_REALTIME, &ts);
-                ts.tv_sec += QUANTUM;
-                pthread_cond_timedwait(&cond_turno, control->mutex, &ts);
-                
-                mover_a_espera(siguiente);
+                jugador_t *jugador = &jugadores[siguiente - 1];
+                pcbs[siguiente - 1].estado = EJECUTANDO;
+
+                pthread_t hilo_jugador;
+                pthread_create(&hilo_jugador, NULL, jugador_thread, jugador);
+                pthread_detach(hilo_jugador);
+
+                // Esperar a que termine el turno o se agote el quantum
+                struct timespec timeout;
+                clock_gettime(CLOCK_REALTIME, &timeout);
+                timeout.tv_sec += QUANTUM;
+                pthread_cond_timedwait(control->cond, &mutex, &timeout);
+
                 proceso_en_ejecucion = -1;
+                if (modo == 'R')
+                {
+                    agregar_a_cola_listos(siguiente);
+                }
             }
         }
-        
-        pthread_mutex_unlock(control->mutex);
+
+        pthread_mutex_unlock(&mutex);
         nanosleep(&sleep_time, NULL);
     }
     return NULL;
@@ -2125,11 +2471,11 @@ void *planificador(void *arg) {
 // Función para bloquear jugador
 void bloquear_jugador(int id_jugador, int tiempo)
 {
-    if (num_de_esperas < NUM_JUGADORES)
+    if (num_bloqueados < NUM_JUGADORES)
     {
-        pcbs[id_jugador - 1].estado = DE_ESPERA;
-        pcbs[id_jugador - 1].tiempo_de_espera = tiempo;
-        cola_de_esperas[num_de_esperas++] = id_jugador;
+        pcbs[id_jugador - 1].estado = BLOQUEADO;
+        pcbs[id_jugador - 1].tiempo_bloqueado = tiempo;
+        cola_bloqueados[num_bloqueados++] = id_jugador;
     }
 }
 
@@ -2141,23 +2487,25 @@ void bloquear_jugador(int id_jugador, int tiempo)
 // Cada jugador tiene su propio hilo que ejecuta esta función
 // El jugador espera su turno, realiza acciones y luego pasa el turno
 
-void *jugador_thread(void *arg) {
+void *jugador_thread(void *arg)
+{
     jugador_t *jugador = (jugador_t *)arg;
     pcb_t *mi_pcb = &pcbs[jugador->id - 1];
-    struct timespec start, now, ts;
+    struct timespec start, now;
     bool turno_activo = true;
 
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    while (turno_activo && !juego_terminado) {
+    while (turno_activo && !juego_terminado)
+    {
         pthread_mutex_lock(&mutex);
 
         printf("\n=== Turno de %s ===\n", jugador->nombre);
         mostrar_mano(&jugador->mano);
         printf("\nOpciones:\n");
-        printf("1. Robar ficha\n2. Hacer apeada\n3. Embonar ficha\n");
+        printf("1. Robar carta\n2. Hacer apeada\n3. Embonar carta\n");
         printf("4. Mostrar banco\n5. Pasar turno\n");
-        printf("\nSeleccione (1-5): ");
+        printf("Seleccione (1-5): ");
         fflush(stdout);
 
         pthread_mutex_unlock(&mutex);
@@ -2166,195 +2514,186 @@ void *jugador_thread(void *arg) {
         char input[10] = {0};
         bool hizo_accion = false;
 
-        while (true) {
+        while (true)
+        {
             struct pollfd mypoll = {STDIN_FILENO, POLLIN, 0};
             int ret = poll(&mypoll, 1, 200);
 
             clock_gettime(CLOCK_MONOTONIC, &now);
             double elapsed = (now.tv_sec - start.tv_sec);
 
-            if (modo == 'R' && elapsed >= QUANTUM) {
+            if (modo == 'R' && elapsed >= QUANTUM)
+            {
                 printf("\n¡Tiempo agotado para %s!\n", jugador->nombre);
                 turno_activo = false;
                 break;
             }
 
-            if (ret > 0 && read(STDIN_FILENO, input, sizeof(input)) > 0) {
+            if (ret > 0 && read(STDIN_FILENO, input, sizeof(input)) > 0)
+            {
                 opcion = atoi(input);
                 break;
             }
-            
-            // Usar nanosleep en lugar de usleep
-            ts.tv_sec = 0;
-            ts.tv_nsec = 100000000; // 100 ms
-            nanosleep(&ts, NULL);
         }
 
         pthread_mutex_lock(&mutex);
 
-        switch (opcion) {
-            case 1: // Robar ficha
-                if (mazo.cantidad > 0) {
-                    pthread_mutex_lock(&mutex_mesa);
-                    ficha_t nueva = mazo.fichas[--mazo.cantidad];
-                    pthread_mutex_unlock(&mutex_mesa);
-                    
-                    pthread_mutex_lock(&mutex_juego);
-                    agregar_ficha(&jugador->mano, nueva);
-                    pthread_mutex_unlock(&mutex_juego);
-                    
-                    mostrar_robo_ficha(&nueva, false);
-                    jugador->ficha_agregada = true;
-                    turno_activo = false;
-                    hizo_accion = true;
-                }
-                break;
-
-            case 2: // Hacer apeada
-                if (puede_hacer_apeada(jugador)) {
-                    apeada_t apeada = calcular_mejor_apeada_aux(jugador);
-                    pthread_mutex_lock(&mutex_mesa);
-                    bool apeada_exitosa = realizar_apeada_optima(jugador, &banco_apeadas);
-                    pthread_mutex_unlock(&mutex_mesa);
-                    
-                    if (apeada_exitosa) {
-                        printf("\n¡Apeada exitosa!\n");
-                        mostrar_apeada(&apeada);
-                        hizo_accion = true;
-                        if (modo == 'F') {
-                            turno_activo = false;
-                        }
-                    }
-                    apeada_liberar(&apeada);
-                } else {
-                    printf("\nNo tienes combinaciones válidas para apear\n");
-                }
-                break;
-
-            case 3: // Embonar ficha
-                if (jugador->mano.cantidad > 0) {
-                    mostrar_mano(&jugador->mano);
-                    printf("\nSeleccione ficha (1-%d): ", jugador->mano.cantidad);
-                    fflush(stdout);
-
-                    struct pollfd ficha_poll = {STDIN_FILENO, POLLIN, 0};
-                    char input2[10] = {0};
-                    while (true) {
-                        int ret = poll(&ficha_poll, 1, 200);
-                        clock_gettime(CLOCK_MONOTONIC, &now);
-                        double elapsed = (now.tv_sec - start.tv_sec);
-
-                        if (modo == 'R' && elapsed >= QUANTUM) {
-                            printf("\n¡Tiempo agotado para %s!\n", jugador->nombre);
-                            turno_activo = false;
-                            break;
-                        }
-
-                        if (ret > 0 && read(STDIN_FILENO, input2, sizeof(input2)) > 0) {
-                            int idx = atoi(input2) - 1;
-                            if (idx >= 0 && idx < jugador->mano.cantidad) {
-                                pthread_mutex_lock(&mutex_mesa);
-                                bool embonado = embonar_ficha(jugador, &banco_apeadas, idx);
-                                pthread_mutex_unlock(&mutex_mesa);
-                                
-                                if (embonado) {
-                                    printf("\n¡Ficha embonada con éxito!\n");
-                                    hizo_accion = true;
-                                    if (modo == 'F') {
-                                        turno_activo = false;
-                                    }
-                                } else {
-                                    printf("\nNo se pudo embonar la ficha\n");
-                                }
-                            } else {
-                                printf("\nÍndice inválido\n");
-                            }
-                            break;
-                        }
-                        
-                        // Usar nanosleep en lugar de usleep
-                        ts.tv_sec = 0;
-                        ts.tv_nsec = 100000000; // 100 ms
-                        nanosleep(&ts, NULL);
-                    }
-                } else {
-                    printf("\nNo tienes fichas para embonar\n");
-                }
-                break;
-
-            case 4: // Mostrar banco
-                pthread_mutex_lock(&mutex_mesa);
-                mostrar_banco(&banco_apeadas);
-                pthread_mutex_unlock(&mutex_mesa);
-                break;
-
-            case 5: // Pasar turno
-                pthread_mutex_lock(&mutex_mesa);
-                if (mazo.cantidad > 0) {
-                    ficha_t nueva = mazo.fichas[--mazo.cantidad];
-                    pthread_mutex_unlock(&mutex_mesa);
-                    
-                    pthread_mutex_lock(&mutex_juego);
-                    agregar_ficha(&jugador->mano, nueva);
-                    pthread_mutex_unlock(&mutex_juego);
-                    
-                    mostrar_robo_ficha(&nueva, false);
-                    mi_pcb->fichas_en_mano = jugador->mano.cantidad;
-                    mi_pcb->fichas_robadas++;
-                    printf("\nHas pasado el turno y robado una ficha.\n");
-                } else {
-                    pthread_mutex_unlock(&mutex_mesa);
-                    printf("\nNo se puede robar una ficha: el mazo está vacío.\n");
-                }
-                
+        switch (opcion)
+        {
+        case 1:
+            if (mazo.cantidad > 0)
+            {
+                carta_t nueva = mazo.cartas[--mazo.cantidad];
+                agregar_carta(&jugador->mano, nueva);
+                mostrar_robo_carta(&nueva, false);
+                jugador->carta_agregada = true;
                 turno_activo = false;
                 hizo_accion = true;
-                break;
+            }
+            break;
 
-            default:
-                if (opcion != -1) {
-                    printf("\nOpción inválida. Por favor seleccione 1-5\n");
+        case 2:
+            /*if (puede_hacer_apeada(jugador))
+            {
+                apeada_t apeada = calcular_mejor_apeada_aux(jugador);
+                if (realizar_apeada_optima(jugador, &banco_apeadas))
+                {
+                    printf("¡Apeada exitosa!\n");
+                    mostrar_apeada(&apeada);
+                    hizo_accion = true;
+                    if (modo == 'F')
+                    {
+                        turno_activo = false;
+                    }
                 }
-                break;
+                apeada_liberar(&apeada);
+            }
+            else
+            {
+                printf("No tienes combinaciones válidas para apear\n");
+            }
+            break;*/
+
+        case 3:
+            /*if (jugador->mano.cantidad > 0)
+            {
+                mostrar_mano(&jugador->mano);
+                printf("Seleccione carta (1-%d): ", jugador->mano.cantidad);
+                fflush(stdout);
+
+                struct pollfd carta_poll = {STDIN_FILENO, POLLIN, 0};
+                char input2[10] = {0};
+                while (true)
+                {
+                    int ret = poll(&carta_poll, 1, 200);
+                    clock_gettime(CLOCK_MONOTONIC, &now);
+                    double elapsed = (now.tv_sec - start.tv_sec);
+
+                    if (modo == 'R' && elapsed >= QUANTUM)
+                    {
+                        printf("\n¡Tiempo agotado para %s!\n", jugador->nombre);
+                        turno_activo = false;
+                        break;
+                    }
+
+                    if (ret > 0 && read(STDIN_FILENO, input2, sizeof(input2)) > 0)
+                    {
+                        int idx = atoi(input2) - 1;
+                        if (idx >= 0 && idx < jugador->mano.cantidad)
+                        {
+                            if (embonar_carta(jugador, &banco_apeadas, idx))
+                            {
+                                printf("¡Carta embonada con éxito!\n");
+                                hizo_accion = true;
+                                if (modo == 'F')
+                                {
+                                    turno_activo = false;
+                                }
+                            }
+                            else
+                            {
+                                printf("No se pudo embonar la carta\n");
+                            }
+                        }
+                        else
+                        {
+                            printf("Índice inválido\n");
+                        }
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                printf("No tienes cartas para embonar\n");
+            }
+            break;*/
+
+        case 4:
+            /*mostrar_banco(&banco_apeadas);
+            break;
+
+            case 5:
+            if (mazo.cantidad > 0)
+            {
+                carta_t nueva = mazo.cartas[--mazo.cantidad];
+                agregar_carta(&jugador->mano, nueva);
+                mostrar_robo_carta(&nueva, false);
+                mi_pcb->cartas_en_mano = jugador->mano.cantidad;
+                mi_pcb->cartas_robadas++;
+                printf("Has pasado el turno y robado una carta.\n");
+            }
+            else
+            {
+                printf("No se puede robar una carta: el mazo está vacío.\n");
+            }
+        
+            turno_activo = false;
+            hizo_accion = true;
+            break;*/
+
+        default:
+            if (opcion != -1)
+            {
+                printf("Opción inválida. Por favor seleccione 1-5\n");
+            }
+            break;
         }
 
         pthread_mutex_unlock(&mutex);
 
         // Si hubo acción, actualizar PCB y tabla
-        if (hizo_accion) {
-            pthread_mutex_lock(&mutex_pcbs);
+        if (hizo_accion)
+        {
             actualizar_y_escribir_pcb(mi_pcb, jugador);
             actualizar_tabla_procesos(pcbs, NUM_JUGADORES);
-            pthread_mutex_unlock(&mutex_pcbs);
         }
 
         clock_gettime(CLOCK_MONOTONIC, &now);
         double elapsed = (now.tv_sec - start.tv_sec);
-        if (modo == 'R' && elapsed >= QUANTUM) {
+        if (modo == 'R' && elapsed >= QUANTUM)
+        {
             printf("\n¡Quantum completado!\n");
             turno_activo = false;
         }
 
         jugador->tiempo_restante = QUANTUM - (int)elapsed;
 
-        if (!turno_activo) {
+        if (!turno_activo)
+        {
             printf("\n=== Fin de turno de %s ===\n", jugador->nombre);
-            
-            // Mover a cola de espera obligatoriamente
-            pthread_mutex_lock(&mutex_colas);
-            mover_a_espera(jugador->id);
-            pthread_cond_signal(&cond_turno);
-            pthread_mutex_unlock(&mutex_colas);
         }
 
         // Verificar condiciones de victoria
-        if (jugador->mano.cantidad == 0) {
-            printf("\n¡%s se ha quedado sin fichas y gana el juego!\n", jugador->nombre);
+        if (jugador->mano.cantidad == 0)
+        {
+            printf("¡%s se ha quedado sin cartas y gana el juego!\n", jugador->nombre);
             return NULL;
         }
 
-        if (mazo.cantidad == 0) {
-            printf("\n¡El mazo se ha agotado!\n");
+        if (mazo.cantidad == 0)
+        {
+            printf("¡El mazo se ha agotado!\n");
             int ganador = determinar_ganador(jugadores, NUM_JUGADORES, true);
             printf("\n¡Jugador %d (%s) ha ganado!\n", jugadores[ganador].id, jugadores[ganador].nombre);
             return NULL;
@@ -2365,69 +2704,39 @@ void *jugador_thread(void *arg) {
 }
 
 // Función para agregar a cola de listos
-void agregar_a_cola_listos(int id_jugador) {
-    pthread_mutex_lock(&mutex_colas);
-    
-    if (modo == 'R') {
+void agregar_a_cola_listos(int id_jugador)
+{
+    pthread_mutex_lock(&mutex); // Bloquear acceso a estructuras compartidas
+
+    if (modo == 'R')
+    { // Round Robin
         cola_listos[final] = id_jugador;
         final = (final + 1) % NUM_JUGADORES;
-    } else {
+    }
+    else
+    { // FCFS
+        // Solo se agrega si no está ya en la cola
         bool existe = false;
-        for (int i = frente; i != final; i = (i + 1) % NUM_JUGADORES) {
-            if (cola_listos[i] == id_jugador) {
+        for (int i = frente; i != final; i = (i + 1) % NUM_JUGADORES)
+        {
+            if (cola_listos[i] == id_jugador)
+            {
                 existe = true;
                 break;
             }
         }
-        if (!existe) {
+        if (!existe)
+        {
             cola_listos[final] = id_jugador;
             final = (final + 1) % NUM_JUGADORES;
         }
     }
-    
-    pthread_mutex_unlock(&mutex_colas);
+
+    pthread_mutex_unlock(&mutex);
 }
 
-// Función para inicializar PCBs
-void inicializar_pcbs()
-{
-    for (int i = 0; i < NUM_JUGADORES; i++)
-    {
-        // Identificación básica
-        pcbs[i].id_jugador = i + 1;
-        snprintf(pcbs[i].nombre, sizeof(pcbs[i].nombre), "Jugador %d", i + 1);
-
-        // Estado del proceso/jugador
-        pcbs[i].estado = LISTO;       // Estado inicial (LISTO, EJECUTANDO, DE_ESPERA)
-        pcbs[i].tiempo_de_espera = 0; // Tiempo restante de bloqueo
-        pcbs[i].tiempo_espera_restante = 0; // Tiempo de espera en cola de espera
-
-        // Estadísticas del juego
-        pcbs[i].fichas_en_mano = FICHAS_INICIALES;
-        pcbs[i].puntos = 0;
-        pcbs[i].partidas_jugadas = 0;
-
-        // Tiempos y contadores
-        pcbs[i].tiempo_total_juego = 0;
-        pcbs[i].turnos_jugados = 0;
-        pcbs[i].tiempo_restante = QUANTUM;
-
-        // Acciones del juego
-        pcbs[i].fichas_robadas = 0;
-        pcbs[i].fichas_desfichadas = 0;
-        pcbs[i].grupos_formados = 0;
-        pcbs[i].escaleras_formadas = 0;
-        pcbs[i].victorias_con_escalera = 0;
-
-        // Agregar a la cola de listos inicial
-        pthread_mutex_lock(&mutex_colas);
-        agregar_a_cola_listos(pcbs[i].id_jugador);
-        pthread_mutex_unlock(&mutex_colas);
-    }
-}
-
-// Hilo que verifica jugadores de_esperas periódicamente
-void *verificar_de_esperas(void *arg)
+// Hilo que verifica jugadores bloqueados periódicamente
+void *verificar_bloqueados(void *arg)
 {
     hilo_control_t *control = (hilo_control_t *)arg;
     struct timespec sleep_time = {0, 100000000}; // 100ms
@@ -2443,7 +2752,7 @@ void *verificar_de_esperas(void *arg)
         pthread_mutex_unlock(control->mutex);
 
         pthread_mutex_lock(&mutex);
-        verificar_cola_de_esperas();
+        verificar_cola_bloqueados();
         pthread_mutex_unlock(&mutex);
 
         // Usar nanosleep en lugar de usleep
@@ -2499,48 +2808,41 @@ void reiniciar_cola_listos()
     pthread_cond_signal(&cond_turno); // Notificar al planificador
 }
 
-bool cola_vacia(void) {
-    return frente == final;
+void mover_a_cola_bloqueados(int id_jugador)
+{
+    // Bloquear el jugador en su PCB
+    pcbs[id_jugador - 1].estado = BLOQUEADO;
+    pcbs[id_jugador - 1].tiempo_bloqueado = rand() % (20 - 10 + 1) + 10; // Tiempo aleatorio entre 10 y 20
+
+    // Agregar a la cola de bloqueados
+    if (num_bloqueados < NUM_JUGADORES)
+    {
+        cola_bloqueados[num_bloqueados++] = id_jugador;
+    }
+
+    printf("Jugador %d bloqueado por %d segundos\n", id_jugador, pcbs[id_jugador - 1].tiempo_bloqueado);
 }
 
-void mover_a_espera(int id_jugador) {    
-    // Generar tiempo aleatorio entre 10-35 segundos
-    int tiempo_espera = (rand() % 26) + 10;
-    
-    pcbs[id_jugador-1].estado = DE_ESPERA;
-    pcbs[id_jugador-1].tiempo_espera_restante = tiempo_espera;
-    
-    // Agregar a cola de espera
-    cola_de_esperas[num_de_esperas] = id_jugador;
-    num_de_esperas++;
-    
-    printf("\nJugador %d en espera por %d segundos\n", id_jugador, tiempo_espera);
-}
+void verificar_cola_bloqueados()
+{
+    for (int i = 0; i < num_bloqueados; i++)
+    {
+        pcbs[cola_bloqueados[i] - 1].tiempo_restante--;
+        if (pcbs[cola_bloqueados[i] - 1].tiempo_restante <= 0)
+        {
+            printf("Jugador %d ha terminado su tiempo en E/S. Moviendo a la cola de listos.\n", cola_bloqueados[i]);
+            agregar_a_cola_listos(cola_bloqueados[i]);
+            pcbs[cola_bloqueados[i] - 1].estado = 1; // Listo
 
-void verificar_cola_de_esperas() {
-    pthread_mutex_lock(&mutex_colas);
-    
-    for (int i = 0; i < num_de_esperas; i++) {
-        int jugador_id = cola_de_esperas[i];
-        pcb_t *pcb = &pcbs[jugador_id-1];
-        
-        if (--pcb->tiempo_espera_restante <= 0) {
-            // Mover a cola de listos
-            agregar_a_cola_listos(jugador_id);
-            pcb->estado = LISTO;
-            
-            // Eliminar de cola de esperas
-            for (int j = i; j < num_de_esperas-1; j++) {
-                cola_de_esperas[j] = cola_de_esperas[j+1];
+            // Eliminar jugador de la cola de bloqueados
+            for (int j = i; j < num_bloqueados - 1; j++)
+            {
+                cola_bloqueados[j] = cola_bloqueados[j + 1];
             }
-            num_de_esperas--;
-            i--;
-            
-            printf("\nJugador %d sale de espera\n", jugador_id);
+            num_bloqueados--;
+            i--; // Ajustar índice después de eliminar
         }
     }
-    
-    pthread_mutex_unlock(&mutex_colas);
 }
 
 void iniciar_concurrencia()
@@ -2600,7 +2902,7 @@ void mostrar_estado_juego()
 
     for (int i = 0; i < NUM_JUGADORES; i++)
     {
-        printf("\nJugador %d (%s): %d fichas, %d puntos\n",
+        printf("Jugador %d (%s): %d cartas, %d puntos\n",
                jugadores[i].id,
                jugadores[i].nombre,
                jugadores[i].mano.cantidad,
@@ -2649,12 +2951,12 @@ void *manejar_turnos(void *arg)
         turno_actual = jugador_id;
         jugador_t *jugador_actual = &jugadores[jugador_id - 1];
 
-        printf("\nTurno del jugador: %s (ID: %d)\n", jugador_actual->nombre, jugador_id);
+        printf("Turno del jugador: %s (ID: %d)\n", jugador_actual->nombre, jugador_id);
 
         // Verificar si el jugador tiene tiempo restante
         if (jugador_actual->tiempo_restante <= 0)
         {
-            printf("\nJugador %s ha perdido su turno por falta de tiempo.\n", jugador_actual->nombre);
+            printf("Jugador %s ha perdido su turno por falta de tiempo.\n", jugador_actual->nombre);
             pthread_mutex_unlock(&mutex);
             continue; // Pasar al siguiente jugador
         }
@@ -2666,7 +2968,7 @@ void *manejar_turnos(void *arg)
 
         if (jugador_actual->tiempo_restante <= 0)
         {
-            printf("\nTiempo agotado para el jugador %s\n", jugador_actual->nombre);
+            printf("Tiempo agotado para el jugador %s\n", jugador_actual->nombre);
         }
 
         pthread_mutex_unlock(&mutex);
@@ -2675,18 +2977,10 @@ void *manejar_turnos(void *arg)
     return NULL;
 }
 
-void mostrar_politica_actual() {
-    const char* politica = (modo == 'F') ? 
-        "FCFS (Turnos completos en orden de llegada)" : 
-        "Round Robin (Quantum de %d segundos)";
-    
-    if (modo == 'F') {
-        printf("\nPolítica actual: %s\n", politica);
-    } else {
-        printf("\nPolítica actual: ");
-        printf(politica, QUANTUM);
-        printf("\n");
-    }
+void mostrar_politica_actual()
+{
+    printf("\nPolítica actual: %s\n",
+           (modo == 'F') ? "FCFS (Turnos completos en orden de llegada)" : "Round Robin (Quantum de 20 segundos)");
     printf("───────────────────────────────────────────────────────\n");
 }
 
@@ -2696,7 +2990,7 @@ void elegir_politica()
     printf("\n║   SELECCIÓN DE POLÍTICA DE PLANIFICACIÓN   ║");
     printf("\n╠════════════════════════════════════════════╣");
     printf("\n║ F - First Come First Served (FCFS)         ║");
-    printf("\n║ R - Round Robin (Quantum %d segundos)      ║", QUANTUM);
+    printf("\n║ R - Round Robin (Quantum 20 segundos)      ║");
     printf("\n╚════════════════════════════════════════════╝");
     printf("\nSeleccione política (F/R): ");
 
@@ -2707,29 +3001,29 @@ void elegir_politica()
     if (opcion == 'F' || opcion == 'f')
     {
         modo = 'F';
-        printf("\nPolítica cambiada a FCFS: Turnos completos en orden de llegada\n");
+        printf("\n✔ Política cambiada a FCFS: Turnos completos en orden de llegada\n");
     }
     else if (opcion == 'R' || opcion == 'r')
     {
         modo = 'R';
-        printf("\nPolítica cambiada a Round Robin: Quantum de %d segundos\n", QUANTUM);
+        printf("\n✔ Política cambiada a Round Robin: Quantum de %d segundos\n", QUANTUM);
     }
     else
     {
-        printf("\nManteniendo política actual: %s\n",
+        printf("\n➜ Manteniendo política actual: %s\n",
                (modo == 'F') ? "FCFS" : "Round Robin");
     }
 
     mostrar_politica_actual();
 }
 
-// Función auxiliar para mostrar mensajes de robo de ficha
-void mostrar_robo_ficha(const ficha_t *ficha, bool es_automatico)
+// Función auxiliar para mostrar mensajes de robo de carta
+void mostrar_robo_carta(const carta_t *carta, bool es_automatico)
 {
     printf("%s: %d de %s\n",
-           es_automatico ? "\nRobaste automáticamente" : "Robaste",
-           ficha->numero,
-           ficha->color);
+           es_automatico ? "Robaste automáticamente" : "Robaste",
+           carta->numero,
+           carta->color);
 }
 
 // ----------------------------------------------------------------------
@@ -2743,10 +3037,6 @@ int main()
     pthread_mutex_init(&mutex_mesa, NULL);
     pthread_mutex_init(&mutex_terminacion, NULL);
     pthread_cond_init(&cond_turno, NULL);
-    pthread_mutex_init(&mutex_colas, NULL);
-    pthread_mutex_init(&mutex_pcbs, NULL);
-    pthread_mutex_init(&mutex_cola_listos, NULL);
-    pthread_mutex_init(&mutex_juego, NULL);
 
     // 2. Estructuras de control
     volatile bool juego_terminado = false;
@@ -2766,7 +3056,7 @@ int main()
     for (int i = 0; i < NUM_JUGADORES; i++)
     {
         char nombre[MAX_NOMBRE];
-        printf("\nIngrese nombre para Jugador %d: ", i + 1);
+        printf("Ingrese nombre para Jugador %d: ", i + 1);
 
         if (fgets(nombre, MAX_NOMBRE, stdin) == NULL)
         {
@@ -2792,7 +3082,7 @@ int main()
 
     // 5. Crear hilos
     pthread_t hilo_es, hilo_planificador;
-    if (pthread_create(&hilo_es, NULL, verificar_de_esperas, &control) != 0 ||
+    if (pthread_create(&hilo_es, NULL, verificar_bloqueados, &control) != 0 ||
         pthread_create(&hilo_planificador, NULL, planificador, &control) != 0)
     {
         perror("Error creando hilos");
