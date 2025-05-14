@@ -38,9 +38,14 @@
 
 #define TURNO_MAXIMO 30 // 30 segundos por turno
 
-#define TAMANO_MEMORIA 1024  // Tamaño total de memoria en bytes
-#define TAMANO_BLOQUE 32     // Tamaño de cada bloque de memoria en bytes
+#define TAMANO_MEMORIA 102400  
+#define TAMANO_BLOQUE 64       // Bloque de 64 bytes
 #define TAMANO_MAPA_BITS (TAMANO_MEMORIA / TAMANO_BLOQUE / 8) + 1  // Tamaño del arreglo de bits
+
+#define TAMANO_MEMORIA_LISTA 10240  // 10240 unidades de memoria
+
+#define NUM_PAGINAS 6   // Total de páginas en memoria principal
+#define TAMANO_MARCO 4  // Cada marco puede contener 4 páginas
 
 // ----------------------------------------------------------------------
 // Estructuras y Tipos
@@ -162,16 +167,6 @@ typedef struct {
     int bloques_libres;                    // Bloques libres
 } ManejadorMemoriaMapaBits;
 
-void inicializar_mapa_bits(ManejadorMemoriaMapaBits *manejador) {
-    manejador->bloques_totales = TAMANO_MEMORIA / TAMANO_BLOQUE;
-    manejador->bloques_libres = manejador->bloques_totales;
-    
-    // Inicializar todos los bits a 0 (libres)
-    for (int i = 0; i < TAMANO_MAPA_BITS; i++) {
-        manejador->mapa_bits[i] = 0;
-    }
-}
-
 //ESTRUCTURAS PARA LISTAS LIGADAS
 
 typedef struct bloque_memoria {
@@ -185,6 +180,21 @@ typedef struct {
     BloqueMemoria *lista_bloques;
     int memoria_total;
 } GestionMemoria;
+
+
+//ESTRUCTURAS PARA LA MEMORIA VIRTUAL
+typedef struct {
+    int id_pagina;  // ID de la página
+    bool en_memoria; // Indica si la página está en memoria principal
+    bool bit_segunda_oportunidad; // Bit para el algoritmo de segunda oportunidad
+} pagina_t;
+
+typedef struct {
+    pagina_t paginas[NUM_PAGINAS]; // Tabla de páginas
+    int puntero_reemplazo;         // Puntero para el algoritmo de segunda oportunidad
+} memoria_virtual_t;
+
+memoria_virtual_t memoria_virtual;
 
 // ----------------------------------------------------------------------
 // Variables Globales
@@ -213,6 +223,9 @@ pthread_cond_t cond_turno = PTHREAD_COND_INITIALIZER; // Variable de condición 
 int proceso_en_ejecucion = -1;                        // ID del proceso en ejecución
 int tiempo_restante_quantum = 0;                      // Tiempo restante del proceso en ejecución
 
+ManejadorMemoriaMapaBits manejador;
+GestionMemoria gm;
+
 mazo_t mazo;        // Mazo de cartas
 int num_listos = 0; // Número de jugadores en la cola de listos
 
@@ -224,6 +237,8 @@ int num_listos = 0; // Número de jugadores en la cola de listos
 void mano_inicializar(mano_t *mano, int capacidad);
 int kbhit();
 void agregar_a_cola_listos(int id_jugador);
+void agregar_carta(mano_t *mano, carta_t carta); // Add declaration for agregar_carta
+void acceder_pagina(int id_pagina); // Add declaration for acceder_pagina
 int siguiente_turno();
 void reiniciar_cola_listos();
 void *jugador_thread(void *arg);
@@ -469,6 +484,26 @@ void inicializar_pcbs() {
             agregar_a_cola_listos(pcbs[i].id_jugador);
         }
     }
+}
+
+void inicializar_mapa_bits(ManejadorMemoriaMapaBits *manejador) {
+    manejador->bloques_totales = TAMANO_MEMORIA / TAMANO_BLOQUE;
+    manejador->bloques_libres = manejador->bloques_totales;
+    
+    // Inicializar todos los bits a 0 (libres)
+    for (int i = 0; i < TAMANO_MAPA_BITS; i++) {
+        manejador->mapa_bits[i] = 0;
+    }
+}
+//Inicialización de la Memoria
+void inicializar_memoria(GestionMemoria *gm, int tamano_total) {
+    gm->memoria_total = tamano_total;
+    gm->lista_bloques = (BloqueMemoria*)malloc(sizeof(BloqueMemoria));
+    
+    gm->lista_bloques->inicio = 0;
+    gm->lista_bloques->tamano = tamano_total;
+    gm->lista_bloques->disponible = 1;
+    gm->lista_bloques->siguiente = NULL;
 }
 
 void mano_liberar(mano_t *mano)
@@ -1879,6 +1914,21 @@ void barajar_mazo(mazo_t *mazo)
     }
 }
 
+void robar_carta(jugador_t *jugador) {
+    if (mazo.cantidad > 0) {
+        carta_t nueva = mazo.cartas[--mazo.cantidad];
+        agregar_carta(&jugador->mano, nueva);
+
+        // Acceder a la página correspondiente a la carta
+        acceder_pagina(nueva.numero);
+
+        mostrar_robo_carta(&nueva, false);
+        jugador->carta_agregada = true;
+    } else {
+        printf("El mazo está vacío. No se puede robar una carta.\n");
+    }
+}
+
 // ----------------------------------------------------------------------
 // Funciones para la Mano
 // ----------------------------------------------------------------------
@@ -2003,28 +2053,12 @@ void imprimir_mapa_bits(ManejadorMemoriaMapaBits *manejador) {
     printf("Estado de la memoria (0=libre, 1=ocupado):\n");
     printf("Bloques totales: %d, Bloques libres: %d\n", 
            manejador->bloques_totales, manejador->bloques_libres);
-    
-    for (int i = 0; i < manejador->bloques_totales; i++) {
-        if (i % 64 == 0) printf("\n");
-        printf("%d", probar_bit(manejador, i));
-    }
     printf("\n");
 }
 
 // ----------------------------------------------------------------------
 // Funciones para la Gestión de Memoria (Lista Ligada)
 // ----------------------------------------------------------------------
-
-//Inicialización de la Memoria
-void inicializar_memoria(GestionMemoria *gm, int tamano_total) {
-    gm->memoria_total = tamano_total;
-    gm->lista_bloques = (BloqueMemoria*)malloc(sizeof(BloqueMemoria));
-    
-    gm->lista_bloques->inicio = 0;
-    gm->lista_bloques->tamano = tamano_total;
-    gm->lista_bloques->disponible = 1;
-    gm->lista_bloques->siguiente = NULL;
-}
 
 //Algoritmo de Mejor Ajuste
 BloqueMemoria* mejor_ajuste(GestionMemoria *gm, int tamano_solicitado) {
@@ -2105,6 +2139,73 @@ void liberar_memoria_lista(GestionMemoria *gm, int direccion, int tamano) {
             free(temp);
         }
     }
+}
+
+
+//inicializar la memoria virtual
+
+// ...existing code...
+
+void inicializar_memoria_virtual() {
+    for (int i = 0; i < NUM_PAGINAS; i++) {
+        memoria_virtual.paginas[i].id_pagina = i;
+        memoria_virtual.paginas[i].en_memoria = false;
+        memoria_virtual.paginas[i].bit_segunda_oportunidad = false;
+    }
+    memoria_virtual.puntero_reemplazo = 0;
+}
+
+//Manejar el fallo de pagina
+
+void manejar_fallo_pagina(int id_pagina) {
+    while (true) {
+        pagina_t *pagina_actual = &memoria_virtual.paginas[memoria_virtual.puntero_reemplazo];
+
+        if (!pagina_actual->bit_segunda_oportunidad) {
+            // Reemplazar esta página
+            printf("Reemplazando página %d con página %d\n", pagina_actual->id_pagina, id_pagina);
+            pagina_actual->en_memoria = false;
+
+            // Actualizar la nueva página
+            memoria_virtual.paginas[id_pagina].en_memoria = true;
+            memoria_virtual.paginas[id_pagina].bit_segunda_oportunidad = true;
+
+            // Mover el puntero al siguiente marco
+            memoria_virtual.puntero_reemplazo = (memoria_virtual.puntero_reemplazo + 1) % NUM_PAGINAS;
+            return;
+        } else {
+            // Dar una segunda oportunidad
+            pagina_actual->bit_segunda_oportunidad = false;
+        }
+
+        // Avanzar el puntero circular
+        memoria_virtual.puntero_reemplazo = (memoria_virtual.puntero_reemplazo + 1) % NUM_PAGINAS;
+    }
+}
+
+// Acceder a paginas
+
+void acceder_pagina(int id_pagina) {
+    if (memoria_virtual.paginas[id_pagina].en_memoria) {
+        // Página está en memoria, actualizar bit de segunda oportunidad
+        printf("Acceso a página %d: HIT\n", id_pagina);
+        memoria_virtual.paginas[id_pagina].bit_segunda_oportunidad = true;
+    } else {
+        // Página no está en memoria, manejar fallo de página
+        printf("Acceso a página %d: MISS\n", id_pagina);
+        manejar_fallo_pagina(id_pagina);
+    }
+}
+
+void mostrar_estado_memoria() {
+    printf("\n=== Estado de la Memoria Virtual ===\n");
+    for (int i = 0; i < NUM_PAGINAS; i++) {
+        printf("Página %d: %s, Bit Segunda Oportunidad: %d\n",
+               memoria_virtual.paginas[i].id_pagina,
+               memoria_virtual.paginas[i].en_memoria ? "En Memoria" : "En Disco",
+               memoria_virtual.paginas[i].bit_segunda_oportunidad);
+    }
+    printf("────────────────────────────────────\n");
 }
 
 //Visualización del Estado de la Memoria
@@ -2426,56 +2527,59 @@ void *hilo_juego_func(void *arg)
 }
 
 // Hilo planificador gestiona turnos de los jugadores
-void *planificador(void *arg)
-{
+void *planificador(void *arg) {
     hilo_control_t *control = (hilo_control_t *)arg;
     struct timespec sleep_time = {0, 100000000}; // 100ms
 
-    while (!*(control->terminar_flag))
-    {
-        pthread_mutex_lock(&mutex);
+    while (!*(control->terminar_flag)) {
+        pthread_mutex_lock(&mutex); // Usar el mutex general del juego
 
-        if (proceso_en_ejecucion == -1)
-        {
+        if (proceso_en_ejecucion == -1) {
             int siguiente = siguiente_turno();
-            if (siguiente != -1)
-            {
+
+            // Verificar si el jugador está LISTO (no bloqueado)
+            if (siguiente != -1 && pcbs[siguiente - 1].estado == LISTO) {
                 proceso_en_ejecucion = siguiente;
                 jugador_t *jugador = &jugadores[siguiente - 1];
                 pcbs[siguiente - 1].estado = EJECUTANDO;
 
+                // Iniciar turno del jugador
                 pthread_t hilo_jugador;
                 pthread_create(&hilo_jugador, NULL, jugador_thread, jugador);
                 pthread_detach(hilo_jugador);
 
-                // Esperar a que termine el turno o se agote el quantum
+                // Esperar fin del turno (quantum o acción)
                 struct timespec timeout;
                 clock_gettime(CLOCK_REALTIME, &timeout);
                 timeout.tv_sec += QUANTUM;
                 pthread_cond_timedwait(control->cond, &mutex, &timeout);
 
                 proceso_en_ejecucion = -1;
-                if (modo == 'R')
-                {
+
+                // --- REINSERTAR SOLO SI NO FUE BLOQUEADO DURANTE EL TURNO ---
+                if (modo == 'R' && pcbs[siguiente - 1].estado == EJECUTANDO) {
                     agregar_a_cola_listos(siguiente);
                 }
             }
         }
 
         pthread_mutex_unlock(&mutex);
-        nanosleep(&sleep_time, NULL);
+        nanosleep(&sleep_time, NULL); // Reducir uso de CPU
     }
     return NULL;
 }
 
 // Función para bloquear jugador
-void bloquear_jugador(int id_jugador, int tiempo)
-{
-    if (num_bloqueados < NUM_JUGADORES)
-    {
+void bloquear_jugador(int id_jugador, int tiempo) {
+    // ¡No usar pthread_mutex_lock aquí! (Ya está bloqueado por el llamador)
+    if (num_bloqueados < NUM_JUGADORES) {        
+        jugadores[id_jugador - 1].estado = BLOQUEADO;
         pcbs[id_jugador - 1].estado = BLOQUEADO;
-        pcbs[id_jugador - 1].tiempo_bloqueado = tiempo;
+        pcbs[id_jugador - 1].tiempo_bloqueado = tiempo * 10; // Convertir segundos a décimas
+
         cola_bloqueados[num_bloqueados++] = id_jugador;
+        printf("[BLOQUEO] %s bloqueado por %d segundos.\n", 
+               jugadores[id_jugador - 1].nombre, tiempo);
     }
 }
 
@@ -2553,7 +2657,7 @@ void *jugador_thread(void *arg)
             break;
 
         case 2:
-            /*if (puede_hacer_apeada(jugador))
+            if (puede_hacer_apeada(jugador))
             {
                 apeada_t apeada = calcular_mejor_apeada_aux(jugador);
                 if (realizar_apeada_optima(jugador, &banco_apeadas))
@@ -2572,10 +2676,10 @@ void *jugador_thread(void *arg)
             {
                 printf("No tienes combinaciones válidas para apear\n");
             }
-            break;*/
+            break;
 
         case 3:
-            /*if (jugador->mano.cantidad > 0)
+            if (jugador->mano.cantidad > 0)
             {
                 mostrar_mano(&jugador->mano);
                 printf("Seleccione carta (1-%d): ", jugador->mano.cantidad);
@@ -2627,10 +2731,10 @@ void *jugador_thread(void *arg)
             {
                 printf("No tienes cartas para embonar\n");
             }
-            break;*/
+            break;
 
         case 4:
-            /*mostrar_banco(&banco_apeadas);
+            mostrar_banco(&banco_apeadas);
             break;
 
             case 5:
@@ -2650,7 +2754,7 @@ void *jugador_thread(void *arg)
         
             turno_activo = false;
             hizo_accion = true;
-            break;*/
+            break;
 
         default:
             if (opcion != -1)
@@ -2682,7 +2786,19 @@ void *jugador_thread(void *arg)
         if (!turno_activo)
         {
             printf("\n=== Fin de turno de %s ===\n", jugador->nombre);
+            srand(time(NULL)); // Inicializa la semilla aleatoria una sola vez
+
+            int tam_random = (rand() % 151) + 50; // número aleatorio entre 50 y 200
+            int direccion1 = asignar_memoria_mapa(&manejador, tam_random);
+        
+            printf("\nAsignados %d bytes en mapa en la direccion: %d\n", tam_random, direccion1);
+            imprimir_mapa_bits(&manejador);
+
+            int dir1 = asignar_memoria_lista(&gm, tam_random);
+            printf("\nAsignadas unidades en lista en direccion: %d\n", dir1);
+            mostrar_memoria(&gm);
         }
+    }
 
         // Verificar condiciones de victoria
         if (jugador->mano.cantidad == 0)
@@ -2698,35 +2814,29 @@ void *jugador_thread(void *arg)
             printf("\n¡Jugador %d (%s) ha ganado!\n", jugadores[ganador].id, jugadores[ganador].nombre);
             return NULL;
         }
-    }
 
+        if (!juego_terminado) {
+        int tiempo_bloqueo = (rand() % 11) + 10; // 10-20 seconds
+        bloquear_jugador(jugador->id, tiempo_bloqueo);
+    }
+    
     return NULL;
 }
 
-// Función para agregar a cola de listos
-void agregar_a_cola_listos(int id_jugador)
-{
-    pthread_mutex_lock(&mutex); // Bloquear acceso a estructuras compartidas
+// Función agregar_a_cola_listos (modificada)
+void agregar_a_cola_listos(int id_jugador) {
+    pthread_mutex_lock(&mutex);
 
-    if (modo == 'R')
-    { // Round Robin
-        cola_listos[final] = id_jugador;
-        final = (final + 1) % NUM_JUGADORES;
-    }
-    else
-    { // FCFS
-        // Solo se agrega si no está ya en la cola
+    // Solo agregar si está LISTO y no está ya en la cola
+    if (pcbs[id_jugador - 1].estado == LISTO) {
         bool existe = false;
-        for (int i = frente; i != final; i = (i + 1) % NUM_JUGADORES)
-        {
-            if (cola_listos[i] == id_jugador)
-            {
+        for (int i = frente; i != final; i = (i + 1) % NUM_JUGADORES) {
+            if (cola_listos[i] == id_jugador) {
                 existe = true;
                 break;
             }
         }
-        if (!existe)
-        {
+        if (!existe) {
             cola_listos[final] = id_jugador;
             final = (final + 1) % NUM_JUGADORES;
         }
@@ -2736,29 +2846,46 @@ void agregar_a_cola_listos(int id_jugador)
 }
 
 // Hilo que verifica jugadores bloqueados periódicamente
-void *verificar_bloqueados(void *arg)
-{
+void *verificar_bloqueados(void *arg) {
     hilo_control_t *control = (hilo_control_t *)arg;
-    struct timespec sleep_time = {0, 100000000}; // 100ms
-
-    while (1)
-    {
-        pthread_mutex_lock(control->mutex);
-        if (*(control->terminar_flag))
-        {
-            pthread_mutex_unlock(control->mutex);
+    struct timespec sleep_time = {0, 100000000}; // 100ms (0.1s)
+    
+    while (1) {
+        pthread_mutex_lock(&mutex);
+        
+        if (*(control->terminar_flag)) {
+            pthread_mutex_unlock(&mutex);
             break;
         }
-        pthread_mutex_unlock(control->mutex);
-
-        pthread_mutex_lock(&mutex);
-        verificar_cola_bloqueados();
+        
+        // Procesar todos los bloqueados CADA 100ms
+        for (int i = 0; i < num_bloqueados; i++) {
+            int id = cola_bloqueados[i];
+            jugador_t *jugador = &jugadores[id - 1];
+            
+            if (jugador->tiempo_bloqueado > 0) {
+                jugador->tiempo_bloqueado--;  // Decrementar 1 unidad (0.1s)
+                
+                if (jugador->tiempo_bloqueado <= 0) {
+                    // Mover a LISTOS
+                    jugador->estado = LISTO;
+                    pcbs[id - 1].estado = LISTO;
+                    agregar_a_cola_listos(id);
+                    
+                    // Eliminar de BLOQUEADOS
+                    for (int j = i; j < num_bloqueados - 1; j++) {
+                        cola_bloqueados[j] = cola_bloqueados[j + 1];
+                    }
+                    num_bloqueados--;
+                    i--;
+                    printf("[DESBLOQUEO] %s listo.\n", jugador->nombre);
+                }
+            }
+        }
+        
         pthread_mutex_unlock(&mutex);
-
-        // Usar nanosleep en lugar de usleep
-        nanosleep(&sleep_time, NULL);
+        nanosleep(&sleep_time, NULL); // Esperar 100ms
     }
-
     return NULL;
 }
 
@@ -3051,6 +3178,10 @@ int main()
     banco_inicializar(&banco_apeadas);
     inicializar_jugadores(&mazo);
     inicializar_pcbs();
+    inicializar_mapa_bits(&manejador);
+    inicializar_memoria(&gm, TAMANO_MEMORIA_LISTA);
+    inicializar_memoria_virtual(); // Inicializar memoria virtual
+
 
     // 4. Configurar nombres de jugadores
     for (int i = 0; i < NUM_JUGADORES; i++)
